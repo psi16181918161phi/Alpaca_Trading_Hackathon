@@ -89,6 +89,7 @@ def default_portfolio_context(regime: str = "R01") -> Dict[str, Any]:
         "sector_exposure_pct": 0.1,
         "is_new_long": False,
         "regime": regime,
+        "available_liquidity": 100000.0,
     }
 
 

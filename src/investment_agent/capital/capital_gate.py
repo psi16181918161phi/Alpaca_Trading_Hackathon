@@ -370,6 +370,7 @@ KNOWN_PORTFOLIO_CONTEXT_KEYS = {
     "regime",
     "session_peak_equity",
     "current_equity",
+    "available_liquidity",
 }
 
 # VALID_REGIMES is imported from regimes.py (line 46) — do NOT redefine here.
@@ -631,6 +632,11 @@ def evaluate(
         default=None, min_val=0.0, max_val=1.0, required=True
     )
 
+    available_liquidity = _parse_float(
+        portfolio_context.get("available_liquidity"), "available_liquidity",
+        default=None, min_val=0.0, required=True
+    )
+
     is_new_long = _parse_bool(portfolio_context.get("is_new_long"), "is_new_long", False)
 
     regime_raw = portfolio_context.get("regime", "R01")
@@ -701,6 +707,10 @@ def evaluate(
     for name, g_val in state_gatings.items():
         if g_val == 0.0:
             block_rules.append(f"GATE-{name.upper()}-MIN")
+
+    # Rule LIQ-001: Liquidity floor < $5,000
+    if available_liquidity < 5000.0:
+        block_rules.append("LIQ-001")
 
     # Rule CONC-001: Concentration cap > 20% (0.20)
     if position_pct > 0.20:

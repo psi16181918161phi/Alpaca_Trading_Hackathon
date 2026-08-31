@@ -11,7 +11,15 @@ from investment_agent.execution.hedge_capital_bridge import evaluate_hedge_risk,
 
 load_dotenv()
 
-data_client = StockHistoricalDataClient(os.getenv("APCA_API_KEY_ID"), os.getenv("APCA_API_SECRET_KEY"))
+_data_client = None
+
+
+def _get_data_client():
+    global _data_client
+    if _data_client is None:
+        _data_client = StockHistoricalDataClient(os.getenv("APCA_API_KEY_ID"), os.getenv("APCA_API_SECRET_KEY"))
+    return _data_client
+
 
 DROP_THRESHOLD_PCT = 0.03  # trigger a hedge if price dropped more than 3% from its recent high
 
@@ -22,7 +30,8 @@ def get_recent_prices(symbol, days=10):
         timeframe=TimeFrame.Day,
         start=datetime.now() - timedelta(days=days),
     )
-    bars = data_client.get_stock_bars(request)
+    client = _get_data_client()
+    bars = client.get_stock_bars(request)
     return [bar.close for bar in bars[symbol]]
 
 

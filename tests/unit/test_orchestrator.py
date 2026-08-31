@@ -109,13 +109,18 @@ class TestTradeMemory(unittest.TestCase):
 
     def setUp(self):
         """Create fresh memory for each test."""
-        self.memory = TradeMemory(memory_file="test_memory.json")
+        self.memory_file = f"test_memory_{id(self)}.json"
+        self.memory = TradeMemory(memory_file=self.memory_file)
 
     def tearDown(self):
         """Clean up test memory file."""
         import os
-        if os.path.exists("test_memory.json"):
-            os.remove("test_memory.json")
+        for f in [self.memory_file, f"{self.memory_file}.tmp"]:
+            if os.path.exists(f):
+                try:
+                    os.remove(f)
+                except PermissionError:
+                    pass
 
     def test_log_and_retrieve_experience(self):
         """Verify experience can be logged and retrieved."""
@@ -302,15 +307,30 @@ class TestTradeMemory(unittest.TestCase):
 class TestOrchestrator(unittest.TestCase):
     """Test X Quant X orchestrator."""
 
-    def test_orchestrator_initialization(self):
-        """Verify orchestrator initializes correctly."""
-        orchestrator = XQuantXOrchestrator(
+    def setUp(self):
+        """Create fresh orchestrator with unique memory file for each test."""
+        self.memory_file = f"test_orchestrator_memory_{id(self)}.json"
+        self.orchestrator = XQuantXOrchestrator(
             agent_ids=AGENT_IDS,
             symbol="AAPL",
             use_hmm=False,
             enable_trading=False,
+            memory_file=self.memory_file,
         )
-        self.assertIsNotNone(orchestrator)
+
+    def tearDown(self):
+        """Clean up test memory file."""
+        import os
+        for f in [self.memory_file, f"{self.memory_file}.tmp"]:
+            if os.path.exists(f):
+                try:
+                    os.remove(f)
+                except PermissionError:
+                    pass
+
+    def test_orchestrator_initialization(self):
+        """Verify orchestrator initializes correctly."""
+        self.assertIsNotNone(self.orchestrator)
 
     def test_orchestrator_rejects_empty_agent_ids(self):
         """Verify orchestrator rejects empty agent_ids."""
@@ -330,13 +350,6 @@ class TestOrchestrator(unittest.TestCase):
 
     def test_run_cycle_returns_result(self):
         """Verify run_cycle returns CycleResult."""
-        orchestrator = XQuantXOrchestrator(
-            agent_ids=AGENT_IDS,
-            symbol="AAPL",
-            use_hmm=False,
-            enable_trading=False,
-        )
-
         prices = [100.0 + i * 0.1 for i in range(45)]
         volumes = [1000.0] * 45
         agents = make_agent_outputs(
@@ -350,7 +363,7 @@ class TestOrchestrator(unittest.TestCase):
             portfolio=1.0, fundamental=1.0, market=1.0, sector=1.0
         )
 
-        result = orchestrator.run_cycle(
+        result = self.orchestrator.run_cycle(
             prices=prices,
             volumes=volumes,
             agent_outputs=agents,
@@ -364,6 +377,7 @@ class TestOrchestrator(unittest.TestCase):
                 "sector_exposure_pct": 0.1,
                 "is_new_long": False,
                 "regime": "R01",
+                "available_liquidity": 100000.0,
             },
         )
 
@@ -374,13 +388,6 @@ class TestOrchestrator(unittest.TestCase):
 
     def test_run_cycle_records_experience(self):
         """Verify run_cycle records trade experience."""
-        orchestrator = XQuantXOrchestrator(
-            agent_ids=AGENT_IDS,
-            symbol="AAPL",
-            use_hmm=False,
-            enable_trading=False,
-        )
-
         prices = [100.0 + i * 0.1 for i in range(45)]
         volumes = [1000.0] * 45
         agents = make_agent_outputs(
@@ -394,7 +401,7 @@ class TestOrchestrator(unittest.TestCase):
             portfolio=1.0, fundamental=1.0, market=1.0, sector=1.0
         )
 
-        result = orchestrator.run_cycle(
+        result = self.orchestrator.run_cycle(
             prices=prices,
             volumes=volumes,
             agent_outputs=agents,
@@ -408,6 +415,7 @@ class TestOrchestrator(unittest.TestCase):
                 "sector_exposure_pct": 0.1,
                 "is_new_long": False,
                 "regime": "R01",
+                "available_liquidity": 100000.0,
             },
         )
 
@@ -417,13 +425,6 @@ class TestOrchestrator(unittest.TestCase):
 
     def test_run_cycle_provenance_trace(self):
         """Verify run_cycle produces complete provenance."""
-        orchestrator = XQuantXOrchestrator(
-            agent_ids=AGENT_IDS,
-            symbol="AAPL",
-            use_hmm=False,
-            enable_trading=False,
-        )
-
         prices = [100.0 + i * 0.1 for i in range(45)]
         volumes = [1000.0] * 45
         agents = make_agent_outputs(
@@ -437,7 +438,7 @@ class TestOrchestrator(unittest.TestCase):
             portfolio=1.0, fundamental=1.0, market=1.0, sector=1.0
         )
 
-        result = orchestrator.run_cycle(
+        result = self.orchestrator.run_cycle(
             prices=prices,
             volumes=volumes,
             agent_outputs=agents,
@@ -451,6 +452,7 @@ class TestOrchestrator(unittest.TestCase):
                 "sector_exposure_pct": 0.1,
                 "is_new_long": False,
                 "regime": "R01",
+                "available_liquidity": 100000.0,
             },
         )
 
@@ -462,6 +464,149 @@ class TestOrchestrator(unittest.TestCase):
         self.assertIn("effective_cap", provenance)
         self.assertIn("verdict", provenance)
         self.assertIn("weights", provenance)
+
+    def test_learn_from_outcome_updates_memory(self):
+        """Verify learn_from_outcome updates experience and reputation."""
+        # Create initial experience
+        experience = TradeExperience(
+            timestamp=datetime.now(),
+            symbol="AAPL",
+            regime="R01",
+            regime_probabilities={"R01": 0.8},
+            agent_signals={"agent1": 0.5},
+            ensemble_signal=0.5,
+            disagreement=0.2,
+            effective_confidence=0.8,
+            kalman_gain=0.5,
+            kalman_price=100.0,
+            kalman_trend=0.01,
+            capital_gate_verdict="ALLOW",
+            effective_cap=0.5,
+            state_charges={"economic": 1.0},
+            position_action="BUY",
+            quantity=1.0,
+            confidence=0.8,
+            expected_outcome="Price up",
+            realized_outcome="PENDING",
+            pnl=0.0,
+            lesson="",
+        )
+
+        # Learn from positive outcome
+        self.orchestrator.learn_from_outcome(
+            experience=experience,
+            realized_pnl=100.0,
+            realized_outcome="Profit target hit",
+            lesson="Strong trend continuation in R01",
+        )
+
+        # Verify memory updated
+        history = self.orchestrator.get_trade_history("AAPL")
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0].pnl, 100.0)
+        self.assertEqual(history[0].realized_outcome, "Profit target hit")
+
+    def test_learn_from_outcome_negative_pnl(self):
+        """Verify learn_from_outcome handles negative P&L correctly."""
+        experience = TradeExperience(
+            timestamp=datetime.now(),
+            symbol="AAPL",
+            regime="R01",
+            regime_probabilities={"R01": 0.8},
+            agent_signals={"agent1": 0.5},
+            ensemble_signal=0.5,
+            disagreement=0.2,
+            effective_confidence=0.8,
+            kalman_gain=0.5,
+            kalman_price=100.0,
+            kalman_trend=0.01,
+            capital_gate_verdict="ALLOW",
+            effective_cap=0.5,
+            state_charges={"economic": 1.0},
+            position_action="BUY",
+            quantity=1.0,
+            confidence=0.8,
+            expected_outcome="Price up",
+            realized_outcome="PENDING",
+            pnl=0.0,
+            lesson="",
+        )
+
+        # Learn from negative outcome
+        self.orchestrator.learn_from_outcome(
+            experience=experience,
+            realized_pnl=-50.0,
+            realized_outcome="Stop loss hit",
+            lesson="Overestimated trend strength in R01",
+        )
+
+        history = self.orchestrator.get_trade_history("AAPL")
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0].pnl, -50.0)
+
+    def test_historical_context_returns_stats(self):
+        """Verify get_historical_context returns aggregated statistics."""
+        # Add some historical trades
+        for i in range(10):
+            exp = TradeExperience(
+                timestamp=datetime.now(),
+                symbol="AAPL",
+                regime="R01",
+                regime_probabilities={"R01": 0.8},
+                agent_signals={"agent1": 0.5},
+                ensemble_signal=0.5,
+                disagreement=0.2,
+                effective_confidence=0.8,
+                kalman_gain=0.5,
+                kalman_price=100.0,
+                kalman_trend=0.01,
+                capital_gate_verdict="ALLOW",
+                effective_cap=0.5,
+                state_charges={"economic": 1.0},
+                position_action="BUY",
+                quantity=1.0,
+                confidence=0.8,
+                expected_outcome="Price up",
+                realized_outcome="PENDING",
+                pnl=100.0 if i % 2 == 0 else -50.0,
+                lesson=f"Lesson {i}",
+            )
+            self.orchestrator._trade_memory.log_experience(exp)
+
+        # Get historical context
+        current = TradeExperience(
+            timestamp=datetime.now(),
+            symbol="AAPL",
+            regime="R01",
+            regime_probabilities={"R01": 0.8},
+            agent_signals={"agent1": 0.5},
+            ensemble_signal=0.5,
+            disagreement=0.2,
+            effective_confidence=0.8,
+            kalman_gain=0.5,
+            kalman_price=100.0,
+            kalman_trend=0.01,
+            capital_gate_verdict="ALLOW",
+            effective_cap=0.5,
+            state_charges={"economic": 1.0},
+            position_action="BUY",
+            quantity=1.0,
+            confidence=0.8,
+            expected_outcome="Price up",
+            realized_outcome="PENDING",
+            pnl=0.0,
+            lesson="",
+        )
+
+        context = self.orchestrator.get_historical_context(current, top_k=10)
+
+        self.assertIn("similar_trades", context)
+        self.assertIn("historical_win_rate", context)
+        self.assertIn("avg_pnl", context)
+        self.assertIn("lessons", context)
+        self.assertIn("confidence_adjustment", context)
+        self.assertEqual(context["wins"], 5)
+        self.assertEqual(context["losses"], 5)
 
 
 if __name__ == "__main__":

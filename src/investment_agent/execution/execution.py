@@ -3,10 +3,16 @@ from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import MarketOrderRequest, GetOptionContractsRequest
 from dotenv import load_dotenv
 import os
-
 load_dotenv()
 
-client = TradingClient(os.getenv("APCA_API_KEY_ID"), os.getenv("APCA_API_SECRET_KEY"), paper=True)
+_trading_client = None
+
+
+def _get_trading_client():
+    global _trading_client
+    if _trading_client is None:
+        _trading_client = TradingClient(os.getenv("APCA_API_KEY_ID"), os.getenv("APCA_API_SECRET_KEY"), paper=True)
+    return _trading_client
 
 
 def get_option_contract(underlying_symbol, expiration=None, strike=None, option_type=None):
@@ -20,10 +26,12 @@ def get_option_contract(underlying_symbol, expiration=None, strike=None, option_
         type=contract_type,
         limit=1,
     )
+    client = _get_trading_client()
     contracts = client.get_option_contracts(request).option_contracts
     if not contracts:
         raise ValueError(f"No option contracts found for {underlying_symbol}")
     return contracts[0]
+
 
 MAX_POSITION_PCT = 0.05  # never risk more than 5% of buying power on one trade
 
@@ -33,6 +41,7 @@ def is_trade_safe(symbol, qty, price_per_contract):
         print(f"BLOCKED: no valid price for {symbol}, can't verify trade size safely")
         return False
 
+    client = _get_trading_client()
     account = client.get_account()
     buying_power = float(account.buying_power)
     trade_cost = qty * price_per_contract * 100  # options are priced per share, 100 shares per contract
@@ -53,6 +62,7 @@ def place_order(symbol, side, qty, price_per_contract):
         side=order_side,
         time_in_force=TimeInForce.DAY,
     )
+    client = _get_trading_client()
     result = client.submit_order(order)
     print(f"{side.upper()} {qty}x {symbol} -> status: {result.status}, id: {result.id}")
     return result

@@ -8,7 +8,15 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-data_client = StockHistoricalDataClient(os.getenv("APCA_API_KEY_ID"), os.getenv("APCA_API_SECRET_KEY"))
+_data_client = None
+
+
+def _get_data_client():
+    global _data_client
+    if _data_client is None:
+        _data_client = StockHistoricalDataClient(os.getenv("APCA_API_KEY_ID"), os.getenv("APCA_API_SECRET_KEY"))
+    return _data_client
+
 
 MEMORY_FILE = "memory_log.json"
 
@@ -53,7 +61,8 @@ def already_hedged_recently(symbol, days=3):
 
 def _get_latest_price(symbol):
     request = StockLatestTradeRequest(symbol_or_symbols=symbol)
-    trade = data_client.get_stock_latest_trade(request)
+    client = _get_data_client()
+    trade = client.get_stock_latest_trade(request)
     return float(trade[symbol].price)
 
 

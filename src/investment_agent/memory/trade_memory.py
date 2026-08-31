@@ -73,6 +73,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import numpy as np
+
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -86,12 +88,22 @@ MAX_MEMORY_PER_SYMBOL: int = 1000
 
 # Similarity feature weights
 _SIMILARITY_WEIGHTS = {
-    "regime": 3.0,
+    "regime_probabilities": 3.0,
+    "agent_signals": 2.0,
     "ensemble_signal": 2.0,
     "disagreement": 1.5,
     "kalman_gain": 1.5,
     "effective_cap": 1.0,
     "confidence": 1.0,
+}
+
+# Normalization ranges for non-[0,1] features
+_NORMALIZATION_RANGES = {
+    "effective_cap": (0.0, 1.0),  # effective_cap is already in [0,1]
+    "kalman_gain": (0.0, 1.0),   # Kalman gain is in [0,1]
+    "ensemble_signal": (-1.0, 1.0),  # ensemble signal can be negative
+    "disagreement": (0.0, 1.0),  # disagreement in [0,1]
+    "confidence": (0.0, 1.0),    # confidence in [0,1]
 }
 
 
@@ -223,17 +235,34 @@ class TradeMemory:
         try:
             with open(self._memory_file, "r") as f:
                 raw = json.load(f)
+            if not isinstance(raw, list):
+                raise ValueError(f"Memory file must contain a JSON array, got {type(raw).__name__}")
             self._experiences = [
                 self._deserialize(r) for r in raw if self._is_valid_experience(r)
             ]
-        except Exception:
-            self._experiences = []
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Memory file {self._memory_file} contains invalid JSON: {e}")
+        except Exception as e:
+            raise ValueError(f"Failed to load memory from {self._memory_file}: {e}")
 
     def _save(self) -> None:
-        """Save experiences to disk."""
+        """Save experiences to disk using atomic write."""
         raw = [self._serialize(e) for e in self._experiences]
-        with open(self._memory_file, "w") as f:
+        tmp_path = f"{self._memory_file}.tmp"
+        with open(tmp_path, "w") as f:
             json.dump(raw, f, indent=2, default=str)
+            f.flush()
+            os.fsync(f.fileno())
+        try:
+            os.replace(tmp_path, self._memory_file)
+        except PermissionError:
+            # Windows file locking fallback: write directly
+            with open(self._memory_file, "w") as f:
+                json.dump(raw, f, indent=2, default=str)
+                f.flush()
+                os.fsync(f.fileno())
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
 
     def _serialize(self, exp: TradeExperience) -> Dict[str, Any]:
         """Convert TradeExperience to JSON-serializable dict."""
@@ -358,6 +387,9 @@ class TradeMemory:
     ) -> Tuple[float, List[str]]:
         """Compute similarity between current and historical experiences.
 
+        Uses weighted Euclidean distance with proper normalization for each feature.
+        Features are normalized to [0,1] before comparison.
+
         Returns
         -------
         Tuple[float, List[str]]
@@ -367,53 +399,145 @@ class TradeMemory:
         total_weight = 0.0
         weighted_score = 0.0
 
-        # Regime match (highest weight)
-        if current.regime == historical.regime:
-            weighted_score += _SIMILARITY_WEIGHTS["regime"]
-            reasons.append(f"Same regime ({current.regime})")
-        else:
-            # Partial credit for adjacent regimes
-            current_num = int(current.regime[1:])
-            hist_num = int(historical.regime[1:])
-            if abs(current_num - hist_num) <= 1:
-                weighted_score += _SIMILARITY_WEIGHTS["regime"] * 0.5
-                reasons.append(f"Adjacent regime ({current.regime} vs {historical.regime})")
-        total_weight += _SIMILARITY_WEIGHTS["regime"]
+        # 1. Regime probability vector similarity (highest weight)
+        prob_sim = self._compute_probability_similarity(
+            current.regime_probabilities, historical.regime_probabilities
+        )
+        weighted_score += _SIMILARITY_WEIGHTS["regime_probabilities"] * prob_sim
+        total_weight += _SIMILARITY_WEIGHTS["regime_probabilities"]
+        if prob_sim > 0.8:
+            reasons.append(f"Very similar regime distribution ({prob_sim:.2f})")
+        elif prob_sim > 0.5:
+            reasons.append(f"Similar regime distribution ({prob_sim:.2f})")
 
-        # Ensemble signal similarity
-        sig_diff = abs(current.ensemble_signal - historical.ensemble_signal)
-        sig_sim = max(0.0, 1.0 - sig_diff)
+        # 2. Agent signals similarity
+        agent_sim = self._compute_agent_signal_similarity(
+            current.agent_signals, historical.agent_signals
+        )
+        weighted_score += _SIMILARITY_WEIGHTS["agent_signals"] * agent_sim
+        total_weight += _SIMILARITY_WEIGHTS["agent_signals"]
+        if agent_sim > 0.7:
+            reasons.append(f"Similar agent signals ({agent_sim:.2f})")
+
+        # 3. Ensemble signal similarity (normalized to [0,1])
+        sig_sim = self._normalized_similarity(
+            current.ensemble_signal, historical.ensemble_signal, "ensemble_signal"
+        )
         weighted_score += _SIMILARITY_WEIGHTS["ensemble_signal"] * sig_sim
         total_weight += _SIMILARITY_WEIGHTS["ensemble_signal"]
         if sig_sim > 0.7:
             reasons.append(f"Similar ensemble signal ({sig_sim:.2f})")
 
-        # Disagreement similarity
-        disag_diff = abs(current.disagreement - historical.disagreement)
-        disag_sim = max(0.0, 1.0 - disag_diff)
+        # 4. Disagreement similarity
+        disag_sim = self._normalized_similarity(
+            current.disagreement, historical.disagreement, "disagreement"
+        )
         weighted_score += _SIMILARITY_WEIGHTS["disagreement"] * disag_sim
         total_weight += _SIMILARITY_WEIGHTS["disagreement"]
 
-        # Kalman gain similarity
-        gain_diff = abs(current.kalman_gain - historical.kalman_gain)
-        gain_sim = max(0.0, 1.0 - gain_diff)
+        # 5. Kalman gain similarity
+        gain_sim = self._normalized_similarity(
+            current.kalman_gain, historical.kalman_gain, "kalman_gain"
+        )
         weighted_score += _SIMILARITY_WEIGHTS["kalman_gain"] * gain_sim
         total_weight += _SIMILARITY_WEIGHTS["kalman_gain"]
 
-        # Effective cap similarity
-        cap_diff = abs(current.effective_cap - historical.effective_cap)
-        cap_sim = max(0.0, 1.0 - cap_diff)
+        # 6. Effective cap similarity
+        cap_sim = self._normalized_similarity(
+            current.effective_cap, historical.effective_cap, "effective_cap"
+        )
         weighted_score += _SIMILARITY_WEIGHTS["effective_cap"] * cap_sim
         total_weight += _SIMILARITY_WEIGHTS["effective_cap"]
 
-        # Confidence similarity
-        conf_diff = abs(current.confidence - historical.confidence)
-        conf_sim = max(0.0, 1.0 - conf_diff)
+        # 7. Confidence similarity
+        conf_sim = self._normalized_similarity(
+            current.confidence, historical.confidence, "confidence"
+        )
         weighted_score += _SIMILARITY_WEIGHTS["confidence"] * conf_sim
         total_weight += _SIMILARITY_WEIGHTS["confidence"]
 
         score = weighted_score / total_weight if total_weight > 0 else 0.0
         return score, reasons
+
+    def _normalized_similarity(
+        self, current_val: float, historical_val: float, feature_name: str
+    ) -> float:
+        """Compute normalized similarity between two feature values.
+
+        Normalizes values to [0,1] based on known ranges before computing
+        1 - |current - historical|. This prevents scale-dependent features
+        from dominating similarity.
+        """
+        min_val, max_val = _NORMALIZATION_RANGES.get(
+            feature_name, (0.0, 1.0)
+        )
+        range_val = max_val - min_val
+        if range_val <= 0:
+            return 1.0 if current_val == historical_val else 0.0
+
+        # Normalize to [0,1]
+        current_norm = (current_val - min_val) / range_val
+        historical_norm = (historical_val - min_val) / range_val
+
+        # Clamp to [0,1]
+        current_norm = max(0.0, min(1.0, current_norm))
+        historical_norm = max(0.0, min(1.0, historical_norm))
+
+        diff = abs(current_norm - historical_norm)
+        return max(0.0, 1.0 - diff)
+
+    def _compute_probability_similarity(
+        self, current_probs: Dict[str, float], historical_probs: Dict[str, float]
+    ) -> float:
+        """Compute similarity between two regime probability distributions.
+
+        Uses cosine similarity on the full 12-dimensional probability vector.
+        This captures similarity in regime confidence, not just hard assignment.
+        """
+        all_regimes = sorted(set(current_probs.keys()) | set(historical_probs.keys()))
+        if not all_regimes:
+            return 0.0
+
+        current_vec = np.array([current_probs.get(r, 0.0) for r in all_regimes])
+        historical_vec = np.array([historical_probs.get(r, 0.0) for r in all_regimes])
+
+        # Cosine similarity
+        dot = np.dot(current_vec, historical_vec)
+        norm_current = np.linalg.norm(current_vec)
+        norm_historical = np.linalg.norm(historical_vec)
+
+        if norm_current < 1e-10 or norm_historical < 1e-10:
+            return 0.0
+
+        return float(dot / (norm_current * norm_historical))
+
+    def _compute_agent_signal_similarity(
+        self, current_signals: Dict[str, float], historical_signals: Dict[str, float]
+    ) -> float:
+        """Compute similarity between agent signal configurations.
+
+        Compares signals for agents present in both configurations.
+        Uses normalized Euclidean distance on the common agent set.
+        """
+        common_agents = sorted(
+            set(current_signals.keys()) & set(historical_signals.keys())
+        )
+        if not common_agents:
+            return 0.0
+
+        current_vec = np.array([current_signals[a] for a in common_agents])
+        historical_vec = np.array([historical_signals[a] for a in common_agents])
+
+        # Normalize by signal range [-1, 1]
+        current_norm = current_vec / 1.0
+        historical_norm = historical_vec / 1.0
+
+        diff = np.linalg.norm(current_norm - historical_norm)
+        max_diff = math.sqrt(len(common_agents))
+        if max_diff <= 0:
+            return 0.0
+
+        return max(0.0, 1.0 - diff / max_diff)
 
     def get_history(self, symbol: Optional[str] = None) -> List[TradeExperience]:
         """Return experience history, optionally filtered by symbol.

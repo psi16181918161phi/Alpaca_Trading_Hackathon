@@ -271,7 +271,7 @@ class TestAgentReputationTracker(unittest.TestCase):
                 market=1.0,
                 sector=1.0,
             ),
-            portfolio_context={"position_pct": 0.05, "gross_leverage": 0.5, "entropy": 0.5, "drawdown_pct": 0.02, "execution_timeout_seconds": 5.0, "is_new_long": False, "sector_exposure_pct": 0.15, "regime": "R01"},
+            portfolio_context={"position_pct": 0.05, "gross_leverage": 0.5, "entropy": 0.5, "drawdown_pct": 0.02, "execution_timeout_seconds": 5.0, "is_new_long": False, "sector_exposure_pct": 0.15, "regime": "R01", "available_liquidity": 100000.0},
             agents=agents,
             agent_weights=w_updated,
         )
@@ -691,6 +691,7 @@ class TestAgentReputationTracker(unittest.TestCase):
                     "entropy": 0.5, "drawdown_pct": 0.02,
                     "execution_timeout_seconds": 5.0, "is_new_long": True,
                     "sector_exposure_pct": 0.15, "regime": "R01",
+                    "available_liquidity": 100000.0,
                 },
                 agents=agents,
                 agent_weights=weights,

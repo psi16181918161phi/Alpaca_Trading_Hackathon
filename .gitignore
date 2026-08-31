@@ -243,6 +243,12 @@ src/rust/target/
 memory_log.json
 trade_memory.json
 
+# Memory / test artifacts
+memory_log.json
+trade_memory.json
+test_memory_*.json
+audit_log.jsonl
+
 # Keep VS Code MCP config (credentials are NOT stored in it — they use input prompts)
 !.vscode/
 !.vscode/mcp.json
