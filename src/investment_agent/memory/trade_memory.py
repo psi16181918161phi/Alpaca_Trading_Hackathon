@@ -70,6 +70,7 @@ import math
 import os
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -97,6 +98,21 @@ _SIMILARITY_WEIGHTS = {
     "confidence": 1.0,
 }
 
+# Subset of weights that are *market* similarity (capital-independent).
+_MARKET_SIMILARITY_FEATURES = {
+    "regime_probabilities",
+    "agent_signals",
+    "ensemble_signal",
+    "disagreement",
+    "kalman_gain",
+}
+
+# Subset of weights that are *portfolio/capital* similarity.
+_PORTFOLIO_SIMILARITY_FEATURES = {
+    "effective_cap",
+    "confidence",
+}
+
 # Normalization ranges for non-[0,1] features
 _NORMALIZATION_RANGES = {
     "effective_cap": (0.0, 1.0),  # effective_cap is already in [0,1]
@@ -105,6 +121,37 @@ _NORMALIZATION_RANGES = {
     "disagreement": (0.0, 1.0),  # disagreement in [0,1]
     "confidence": (0.0, 1.0),    # confidence in [0,1]
 }
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle
+# ---------------------------------------------------------------------------
+
+class TradeLifecycle(str, Enum):
+    """Lifecycle state of a trade experience.
+
+    PENDING_FILL  : order submitted, awaiting fill
+    OPEN          : filled, position still held
+    CLOSED        : position closed, P&L realized
+    REJECTED      : order rejected by broker
+    CANCELLED     : order or position cancelled
+    """
+
+    PENDING_FILL = "PENDING_FILL"
+    OPEN = "OPEN"
+    CLOSED = "CLOSED"
+    REJECTED = "REJECTED"
+    CANCELLED = "CANCELLED"
+
+    @property
+    def is_terminal(self) -> bool:
+        """Whether the experience is in a final lifecycle state (no further updates)."""
+        return self in (TradeLifecycle.CLOSED, TradeLifecycle.REJECTED, TradeLifecycle.CANCELLED)
+
+    @property
+    def has_realized_pnl(self) -> bool:
+        """Whether this lifecycle admits a meaningful realized P&L value."""
+        return self is TradeLifecycle.CLOSED
 
 
 # ---------------------------------------------------------------------------
@@ -117,6 +164,9 @@ class TradeExperience:
 
     Attributes
     ----------
+    decision_id : str
+        Stable identifier connecting this experience to its decision/audit/order
+        record. Used to exclude self from similarity retrieval.
     timestamp : datetime
         When the trade decision was made.
     symbol : str
@@ -156,11 +206,20 @@ class TradeExperience:
     realized_outcome : str
         Actual realized outcome (filled after trade completion).
     pnl : float
-        Realized profit/loss.
+        Realized profit/loss. Meaningful only for CLOSED lifecycle.
     lesson : str
         Extracted lesson/reflection from this experience.
+    lifecycle_status : str
+        TradeLifecycle value: PENDING_FILL, OPEN, CLOSED, REJECTED, CANCELLED.
+    order_id : Optional[str]
+        Alpaca order ID, set when order submitted.
+    fill_price : Optional[float]
+        Average fill price when order is filled.
+    closed_at : Optional[datetime]
+        When the position was closed.
     """
 
+    decision_id: str
     timestamp: datetime
     symbol: str
     regime: str
@@ -182,24 +241,40 @@ class TradeExperience:
     realized_outcome: str
     pnl: float
     lesson: str
+    lifecycle_status: str = "PENDING_FILL"
+    order_id: Optional[str] = None
+    fill_price: Optional[float] = None
+    closed_at: Optional[datetime] = None
 
 
 @dataclass(frozen=True)
 class SimilarExperience:
     """A historically similar experience with similarity score.
 
+    The ``similarity_score`` is the overall weighted blend. ``market_similarity``
+    and ``portfolio_similarity`` decompose that score so callers can distinguish
+    between market-state similarity and capital-state similarity (P1-4).
+
     Attributes
     ----------
     experience : TradeExperience
         The historical trade experience.
     similarity_score : float
-        Similarity score in [0.0, 1.0], higher is more similar.
+        Overall similarity score in [0.0, 1.0], higher is more similar.
+    market_similarity : float
+        Similarity restricted to market-state features
+        (regime, agent signals, ensemble signal, disagreement, Kalman gain).
+    portfolio_similarity : float
+        Similarity restricted to portfolio/capital features
+        (effective_cap, confidence).
     match_reasons : List[str]
         Human-readable explanations of why this experience is similar.
     """
 
     experience: TradeExperience
     similarity_score: float
+    market_similarity: float
+    portfolio_similarity: float
     match_reasons: List[str]
 
 
@@ -267,6 +342,7 @@ class TradeMemory:
     def _serialize(self, exp: TradeExperience) -> Dict[str, Any]:
         """Convert TradeExperience to JSON-serializable dict."""
         return {
+            "decision_id": exp.decision_id,
             "timestamp": exp.timestamp.isoformat(),
             "symbol": exp.symbol,
             "regime": exp.regime,
@@ -288,11 +364,18 @@ class TradeMemory:
             "realized_outcome": exp.realized_outcome,
             "pnl": exp.pnl,
             "lesson": exp.lesson,
+            "lifecycle_status": exp.lifecycle_status,
+            "order_id": exp.order_id,
+            "fill_price": exp.fill_price,
+            "closed_at": exp.closed_at.isoformat() if exp.closed_at else None,
         }
 
     def _deserialize(self, raw: Dict[str, Any]) -> TradeExperience:
         """Convert JSON dict to TradeExperience."""
+        closed_at_raw = raw.get("closed_at")
+        closed_at = datetime.fromisoformat(closed_at_raw) if closed_at_raw else None
         return TradeExperience(
+            decision_id=raw.get("decision_id", ""),
             timestamp=datetime.fromisoformat(raw["timestamp"]),
             symbol=raw["symbol"],
             regime=raw["regime"],
@@ -314,6 +397,10 @@ class TradeMemory:
             realized_outcome=raw.get("realized_outcome", ""),
             pnl=raw.get("pnl", 0.0),
             lesson=raw.get("lesson", ""),
+            lifecycle_status=raw.get("lifecycle_status", "CLOSED"),
+            order_id=raw.get("order_id"),
+            fill_price=raw.get("fill_price"),
+            closed_at=closed_at,
         )
 
     def _is_valid_experience(self, raw: Dict[str, Any]) -> bool:
@@ -322,7 +409,7 @@ class TradeMemory:
         return all(field in raw for field in required)
 
     def log_experience(self, experience: TradeExperience) -> None:
-        """Record a new trade experience.
+        """Record a new trade experience (typically in PENDING_FILL or OPEN state).
 
         Parameters
         ----------
@@ -332,6 +419,94 @@ class TradeMemory:
         self._experiences.append(experience)
         self._enforce_limits()
         self._save()
+
+    def update_experience(
+        self,
+        decision_id: str,
+        **updates: Any,
+    ) -> TradeExperience:
+        """Update an existing experience in place (P0-1 lifecycle).
+
+        Only the experience with the matching ``decision_id`` is touched.
+        All other fields are preserved.
+
+        Returns
+        -------
+        TradeExperience
+            The updated experience.
+
+        Raises
+        ------
+        KeyError
+            If no experience with the given decision_id is found.
+        """
+        for i, exp in enumerate(self._experiences):
+            if exp.decision_id == decision_id:
+                data = {
+                    "decision_id": exp.decision_id,
+                    "timestamp": exp.timestamp,
+                    "symbol": exp.symbol,
+                    "regime": exp.regime,
+                    "regime_probabilities": exp.regime_probabilities,
+                    "agent_signals": exp.agent_signals,
+                    "ensemble_signal": exp.ensemble_signal,
+                    "disagreement": exp.disagreement,
+                    "effective_confidence": exp.effective_confidence,
+                    "kalman_gain": exp.kalman_gain,
+                    "kalman_price": exp.kalman_price,
+                    "kalman_trend": exp.kalman_trend,
+                    "capital_gate_verdict": exp.capital_gate_verdict,
+                    "effective_cap": exp.effective_cap,
+                    "state_charges": exp.state_charges,
+                    "position_action": exp.position_action,
+                    "quantity": exp.quantity,
+                    "confidence": exp.confidence,
+                    "expected_outcome": exp.expected_outcome,
+                    "realized_outcome": exp.realized_outcome,
+                    "pnl": exp.pnl,
+                    "lesson": exp.lesson,
+                    "lifecycle_status": exp.lifecycle_status,
+                    "order_id": exp.order_id,
+                    "fill_price": exp.fill_price,
+                    "closed_at": exp.closed_at,
+                }
+                data.update(updates)
+                updated = TradeExperience(**data)
+                self._experiences[i] = updated
+                self._save()
+                return updated
+        raise KeyError(f"No experience with decision_id={decision_id!r}")
+
+    def close_trade(
+        self,
+        decision_id: str,
+        realized_outcome: str,
+        pnl: float,
+        lesson: str = "",
+        closed_at: Optional[datetime] = None,
+    ) -> TradeExperience:
+        """Mark a trade CLOSED with realized P&L (P0-1 lifecycle close).
+
+        Returns
+        -------
+        TradeExperience
+            The updated experience.
+        """
+        return self.update_experience(
+            decision_id,
+            lifecycle_status=TradeLifecycle.CLOSED.value,
+            realized_outcome=realized_outcome,
+            pnl=pnl,
+            lesson=lesson,
+            closed_at=closed_at or datetime.now(),
+        )
+
+    def get_by_decision_id(self, decision_id: str) -> Optional[TradeExperience]:
+        """Look up a single experience by its decision_id."""
+        for exp in self._experiences:
+            if exp.decision_id == decision_id:
+                return exp
+        return None
 
     def _enforce_limits(self) -> None:
         """Enforce per-symbol memory limits."""
@@ -349,6 +524,7 @@ class TradeMemory:
         current: TradeExperience,
         top_k: int = 5,
         min_similarity: float = 0.3,
+        exclude_decision_id: Optional[str] = None,
     ) -> List[SimilarExperience]:
         """Find historically similar experiences.
 
@@ -360,20 +536,29 @@ class TradeMemory:
             Maximum number of similar experiences to return.
         min_similarity : float
             Minimum similarity score threshold.
+        exclude_decision_id : Optional[str]
+            If provided, skip experiences with this decision_id (P1-5: avoid
+            retrieving the very trade you just recorded).
 
         Returns
         -------
         List[SimilarExperience]
-            Ranked list of similar historical experiences.
+            Ranked list of similar historical experiences, each carrying both
+            the overall similarity and the market-only / portfolio-only
+            decomposition (P1-4).
         """
         scored: List[SimilarExperience] = []
 
         for hist in self._experiences:
-            score, reasons = self._compute_similarity(current, hist)
+            if exclude_decision_id and hist.decision_id == exclude_decision_id:
+                continue
+            score, market_sim, portfolio_sim, reasons = self._compute_similarity(current, hist)
             if score >= min_similarity:
                 scored.append(SimilarExperience(
                     experience=hist,
                     similarity_score=score,
+                    market_similarity=market_sim,
+                    portfolio_similarity=portfolio_sim,
                     match_reasons=reasons,
                 ))
 
@@ -384,7 +569,7 @@ class TradeMemory:
         self,
         current: TradeExperience,
         historical: TradeExperience,
-    ) -> Tuple[float, List[str]]:
+    ) -> Tuple[float, float, float, List[str]]:
         """Compute similarity between current and historical experiences.
 
         Uses weighted Euclidean distance with proper normalization for each feature.
@@ -392,19 +577,36 @@ class TradeMemory:
 
         Returns
         -------
-        Tuple[float, List[str]]
-            Similarity score in [0.0, 1.0] and list of match reasons.
+        Tuple[float, float, float, List[str]]
+            (overall_similarity, market_similarity, portfolio_similarity, reasons).
         """
         reasons: List[str] = []
         total_weight = 0.0
         weighted_score = 0.0
+        market_weight = 0.0
+        market_score = 0.0
+        portfolio_weight = 0.0
+        portfolio_score = 0.0
+
+        def _accumulate(name: str, sim: float) -> None:
+            nonlocal total_weight, weighted_score
+            nonlocal market_weight, market_score
+            nonlocal portfolio_weight, portfolio_score
+            w = _SIMILARITY_WEIGHTS[name]
+            weighted_score += w * sim
+            total_weight += w
+            if name in _MARKET_SIMILARITY_FEATURES:
+                market_score += w * sim
+                market_weight += w
+            elif name in _PORTFOLIO_SIMILARITY_FEATURES:
+                portfolio_score += w * sim
+                portfolio_weight += w
 
         # 1. Regime probability vector similarity (highest weight)
         prob_sim = self._compute_probability_similarity(
             current.regime_probabilities, historical.regime_probabilities
         )
-        weighted_score += _SIMILARITY_WEIGHTS["regime_probabilities"] * prob_sim
-        total_weight += _SIMILARITY_WEIGHTS["regime_probabilities"]
+        _accumulate("regime_probabilities", prob_sim)
         if prob_sim > 0.8:
             reasons.append(f"Very similar regime distribution ({prob_sim:.2f})")
         elif prob_sim > 0.5:
@@ -414,8 +616,7 @@ class TradeMemory:
         agent_sim = self._compute_agent_signal_similarity(
             current.agent_signals, historical.agent_signals
         )
-        weighted_score += _SIMILARITY_WEIGHTS["agent_signals"] * agent_sim
-        total_weight += _SIMILARITY_WEIGHTS["agent_signals"]
+        _accumulate("agent_signals", agent_sim)
         if agent_sim > 0.7:
             reasons.append(f"Similar agent signals ({agent_sim:.2f})")
 
@@ -423,8 +624,7 @@ class TradeMemory:
         sig_sim = self._normalized_similarity(
             current.ensemble_signal, historical.ensemble_signal, "ensemble_signal"
         )
-        weighted_score += _SIMILARITY_WEIGHTS["ensemble_signal"] * sig_sim
-        total_weight += _SIMILARITY_WEIGHTS["ensemble_signal"]
+        _accumulate("ensemble_signal", sig_sim)
         if sig_sim > 0.7:
             reasons.append(f"Similar ensemble signal ({sig_sim:.2f})")
 
@@ -432,32 +632,30 @@ class TradeMemory:
         disag_sim = self._normalized_similarity(
             current.disagreement, historical.disagreement, "disagreement"
         )
-        weighted_score += _SIMILARITY_WEIGHTS["disagreement"] * disag_sim
-        total_weight += _SIMILARITY_WEIGHTS["disagreement"]
+        _accumulate("disagreement", disag_sim)
 
         # 5. Kalman gain similarity
         gain_sim = self._normalized_similarity(
             current.kalman_gain, historical.kalman_gain, "kalman_gain"
         )
-        weighted_score += _SIMILARITY_WEIGHTS["kalman_gain"] * gain_sim
-        total_weight += _SIMILARITY_WEIGHTS["kalman_gain"]
+        _accumulate("kalman_gain", gain_sim)
 
         # 6. Effective cap similarity
         cap_sim = self._normalized_similarity(
             current.effective_cap, historical.effective_cap, "effective_cap"
         )
-        weighted_score += _SIMILARITY_WEIGHTS["effective_cap"] * cap_sim
-        total_weight += _SIMILARITY_WEIGHTS["effective_cap"]
+        _accumulate("effective_cap", cap_sim)
 
         # 7. Confidence similarity
         conf_sim = self._normalized_similarity(
             current.confidence, historical.confidence, "confidence"
         )
-        weighted_score += _SIMILARITY_WEIGHTS["confidence"] * conf_sim
-        total_weight += _SIMILARITY_WEIGHTS["confidence"]
+        _accumulate("confidence", conf_sim)
 
         score = weighted_score / total_weight if total_weight > 0 else 0.0
-        return score, reasons
+        mkt = market_score / market_weight if market_weight > 0 else 0.0
+        ptf = portfolio_score / portfolio_weight if portfolio_weight > 0 else 0.0
+        return score, mkt, ptf, reasons
 
     def _normalized_similarity(
         self, current_val: float, historical_val: float, feature_name: str

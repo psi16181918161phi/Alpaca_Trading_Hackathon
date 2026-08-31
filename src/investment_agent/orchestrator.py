@@ -42,11 +42,12 @@ placement as its primary side-effect.
 from __future__ import annotations
 
 import math
+import os
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -59,7 +60,12 @@ from .signals.ensemble_signal import AgentOutput, EnsembleAggregate, compute_ens
 from .filters.investment_kalman_gain import compute_investment_kalman_gain
 from .filters.kalman_filter import KalmanFilter, KalmanState
 from .capital.capital_gate import evaluate, CapitalGateResult, SevenStateVector
-from .memory.trade_memory import TradeMemory, TradeExperience, DEFAULT_MEMORY_FILE
+from .memory.trade_memory import (
+    TradeMemory,
+    TradeExperience,
+    TradeLifecycle,
+    DEFAULT_MEMORY_FILE,
+)
 from .execution.hedge_capital_bridge import evaluate_hedge_risk, HedgeRiskAssessment
 
 
@@ -161,14 +167,44 @@ class AuditLog:
     """Append-only audit log backed by a JSONL file.
 
     Provides:
-    - atomic append writes
+    - best-effort atomic append writes (single ``os.write`` call)
     - event replay for deterministic testing
     - query by decision_id
+    - persistent state: existing events are loaded on ``__init__`` so queries
+      survive process restarts (P1-3).
     """
 
     def __init__(self, log_file: str = AUDIT_LOG_FILE) -> None:
         self._log_file = log_file
         self._events: List[AuditEvent] = []
+        self._load()
+
+    def _load(self) -> None:
+        """Load existing events from disk on initialization (P1-3)."""
+        import json
+
+        if not os.path.exists(self._log_file):
+            return
+        try:
+            with open(self._log_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        raw = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    self._events.append(AuditEvent(
+                        event_id=raw.get("event_id", str(uuid.uuid4())),
+                        event_type=raw.get("event_type", "UNKNOWN"),
+                        decision_id=raw.get("decision_id"),
+                        timestamp=datetime.fromisoformat(raw["timestamp"]) if raw.get("timestamp") else datetime.now(),
+                        symbol=raw.get("symbol", ""),
+                        payload=raw.get("payload", {}),
+                    ))
+        except OSError:
+            return
 
     def record_decision(
         self,
@@ -212,6 +248,13 @@ class AuditLog:
         return [e for e in self._events if e.decision_id == decision_id]
 
     def _append(self, event: AuditEvent) -> None:
+        """Best-effort atomic append: serialize JSON, then a single ``os.write``.
+
+        Note: This is not safe for concurrent multi-process writers sharing the
+        same file (P1-2). It is safe for a single writer with ``O_APPEND`` on
+        POSIX, and within a single process on Windows. Concurrent writers must
+        use external locking.
+        """
         import json
 
         record = {
@@ -222,12 +265,16 @@ class AuditLog:
             "symbol": event.symbol,
             "payload": event.payload,
         }
+        line = (json.dumps(record, default=str) + "\n").encode("utf-8")
         try:
-            with open(self._log_file, "x", encoding="utf-8") as f:
-                f.write(json.dumps(record, default=str) + "\n")
-        except (PermissionError, OSError):
+            fd = os.open(self._log_file, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+            try:
+                os.write(fd, line)
+            finally:
+                os.close(fd)
+        except OSError:
             with open(self._log_file, "a", encoding="utf-8") as f:
-                f.write(json.dumps(record, default=str) + "\n")
+                f.write(line.decode("utf-8"))
 
 
 # ---------------------------------------------------------------------------
@@ -308,6 +355,63 @@ class XQuantXOrchestrator:
         self._trade_memory = TradeMemory(memory_file)
         self._audit_log = AuditLog()
 
+        # P1-1: liquidity must come from the broker. Caller may pass a callable
+        # ``available_liquidity_provider`` that returns the current available
+        # liquidity in dollars. If absent, fall back to 100,000 (canonical
+        # total capital) only for offline/paper testing.
+        self._liquidity_provider: Optional[Callable[[], float]] = None
+        self._fallback_liquidity: float = 100000.0
+
+    def set_liquidity_provider(
+        self,
+        provider: Callable[[], float],
+    ) -> None:
+        """Inject a callable returning live available liquidity (P1-1)."""
+        self._liquidity_provider = provider
+
+    def _current_available_liquidity(self) -> float:
+        if self._liquidity_provider is not None:
+            return float(self._liquidity_provider())
+        return self._fallback_liquidity
+
+    def _preview_experience(
+        self,
+        regime: RegimeClassification,
+        ensemble: EnsembleAggregate,
+        kalman_state: KalmanState,
+        capital_gate: CapitalGateResult,
+        decision: TradingDecision,
+    ) -> TradeExperience:
+        """Build a PENDING_FILL TradeExperience BEFORE logging (P1-5, P0-1)."""
+        return TradeExperience(
+            decision_id=decision.decision_id,
+            timestamp=datetime.now(),
+            symbol=self._symbol,
+            regime=regime.regime,
+            regime_probabilities=dict(regime.regime_affinity),
+            agent_signals={a.agent_id: float(a.s) for a in getattr(decision, "_agent_outputs", [])},
+            ensemble_signal=float(ensemble.ensemble_signal),
+            disagreement=float(ensemble.disagreement),
+            effective_confidence=float(ensemble.effective_confidence),
+            kalman_gain=float(kalman_state.price_variance),
+            kalman_price=float(kalman_state.estimated_price),
+            kalman_trend=float(kalman_state.trend),
+            capital_gate_verdict=capital_gate.verdict.name,
+            effective_cap=float(capital_gate.effective_cap),
+            state_charges=dict(capital_gate.state_charges),
+            position_action=decision.action,
+            quantity=float(decision.quantity),
+            confidence=float(decision.confidence),
+            expected_outcome=decision.reasoning,
+            realized_outcome="PENDING",
+            pnl=0.0,
+            lesson="",
+            lifecycle_status=TradeLifecycle.PENDING_FILL.value,
+            order_id=None,
+            fill_price=None,
+            closed_at=None,
+        )
+
     def run_cycle(
         self,
         prices: List[float],
@@ -319,26 +423,17 @@ class XQuantXOrchestrator:
     ) -> CycleResult:
         """Execute one complete trading cycle.
 
-        Parameters
-        ----------
-        prices : List[float]
-            Historical price series.
-        volumes : Optional[List[float]]
-            Historical volume series.
-        agent_outputs : List[AgentOutput]
-            Specialist agent outputs.
-        states : SevenStateVector
-            Seven-dimensional state-of-charge vector.
-        portfolio_context : Dict[str, Any]
-            Portfolio risk context.
-        sigma_base_squared : float, optional
-            Base model variance (default 1.0).
-
-        Returns
-        -------
-        CycleResult
-            Complete cycle result with decision, regime, ensemble, gate, and experience.
+        P0-2: Historical memory retrieval happens *before* the capital gate.
+        P1-1: ``available_liquidity`` is sourced from the broker via the
+        liquidity provider if set, otherwise from ``portfolio_context``.
+        P0-1: Experience is logged in PENDING_FILL, then optionally updated
+        to OPEN / CLOSED. Reputation is updated *only* on CLOSED.
         """
+        # P1-1: ensure portfolio context carries broker-sourced liquidity.
+        if "available_liquidity" not in portfolio_context:
+            portfolio_context = dict(portfolio_context)
+            portfolio_context["available_liquidity"] = self._current_available_liquidity()
+
         # 1. Classify regime
         regime_result = self._classify_regime(prices, volumes)
 
@@ -360,7 +455,15 @@ class XQuantXOrchestrator:
             sigma_base_squared=sigma_base_squared,
         )
 
-        # 6. Evaluate capital gate (pass pre-computed ensemble to avoid recomputation)
+        # 6. P0-2: retrieve similar historical trades BEFORE the capital gate.
+        historical_context = self._retrieve_historical_context(
+            regime=regime_result,
+            ensemble=ensemble,
+            kalman_state=kalman_state,
+            capital_gate_preview_states=states,
+        )
+
+        # 7. Evaluate capital gate (pass pre-computed ensemble to avoid recomputation)
         capital_gate = evaluate(
             kalman_state=kalman_state,
             states=states,
@@ -371,7 +474,9 @@ class XQuantXOrchestrator:
             ensemble_agg=ensemble,
         )
 
-        # 7. Make trading decision
+        # 8. Make trading decision (uses historical_context, but capital gate is
+        # the hard authority — memory may only adjust confidence/reasoning, never
+        # override the gate).
         decision = self._make_decision(
             regime=regime_result,
             ensemble=ensemble,
@@ -380,6 +485,7 @@ class XQuantXOrchestrator:
             capital_gate=capital_gate,
             weights=weights,
             agent_outputs=agent_outputs,
+            historical_context=historical_context,
         )
 
         self._audit_log.record_decision(
@@ -403,36 +509,45 @@ class XQuantXOrchestrator:
                 "circuit_breakers": decision.circuit_breakers,
                 "reasoning": decision.reasoning,
                 "provenance": decision.provenance,
+                "memory_used": historical_context.get("memory_used", False),
+                "similar_trade_count": historical_context.get("similar_trade_count", 0),
+                "historical_win_rate": historical_context.get("historical_win_rate", 0.0),
+                "historical_avg_pnl": historical_context.get("avg_pnl", 0.0),
+                "memory_adjustment": historical_context.get("confidence_adjustment", 0.0),
             },
         )
 
-        # 8. Execute order (if enabled)
+        # 9. Execute order (if enabled) -> PENDING_FILL
         order_result = self._execute_order(decision)
-
-        # 9. Record experience
-        experience = self._record_experience(
+        experience = self._record_pending_experience(
             regime=regime_result,
             ensemble=ensemble,
             kalman_state=kalman_state,
-            kalman_gain=kalman_gain,
             capital_gate=capital_gate,
             decision=decision,
+            agent_outputs=agent_outputs,
             order_result=order_result,
         )
 
-        self._audit_log.record_outcome(
-            decision_id=decision.decision_id,
-            symbol=self._symbol,
-            payload={
-                "order_result": order_result,
-                "pnl": experience.pnl,
-                "realized_outcome": experience.realized_outcome,
-                "lesson": experience.lesson,
-            },
-        )
-
-        # 10. Update agent reputations (if outcome known)
-        self._update_reputations(experience)
+        # 10. Reputation update ONLY on terminal lifecycle (P0-1).
+        # PENDING_FILL is NOT terminal; a separate close_trade() call is
+        # required to finalize reputation updates.
+        if (
+            experience.lifecycle_status == TradeLifecycle.CLOSED.value
+            or experience.lifecycle_status == TradeLifecycle.REJECTED.value
+        ):
+            self._update_reputations(experience)
+            self._audit_log.record_outcome(
+                decision_id=decision.decision_id,
+                symbol=self._symbol,
+                payload={
+                    "order_result": order_result,
+                    "pnl": experience.pnl,
+                    "realized_outcome": experience.realized_outcome,
+                    "lesson": experience.lesson,
+                    "lifecycle_status": experience.lifecycle_status,
+                },
+            )
 
         return CycleResult(
             decision_id=decision.decision_id,
@@ -444,6 +559,126 @@ class XQuantXOrchestrator:
             capital_gate=capital_gate,
             experience=experience,
         )
+
+    def _retrieve_historical_context(
+        self,
+        regime: RegimeClassification,
+        ensemble: EnsembleAggregate,
+        kalman_state: KalmanState,
+        capital_gate_preview_states: SevenStateVector,
+    ) -> Dict[str, Any]:
+        """Retrieve similar historical trades and summarize outcomes (P0-2)."""
+        preview = TradeExperience(
+            decision_id=str(uuid.uuid4()),
+            timestamp=datetime.now(),
+            symbol=self._symbol,
+            regime=regime.regime,
+            regime_probabilities=dict(regime.regime_affinity),
+            agent_signals={aid: 0.0 for aid in self._agent_ids},
+            ensemble_signal=float(ensemble.ensemble_signal),
+            disagreement=float(ensemble.disagreement),
+            effective_confidence=float(ensemble.effective_confidence),
+            kalman_gain=float(kalman_state.price_variance),
+            kalman_price=float(kalman_state.estimated_price),
+            kalman_trend=float(kalman_state.trend),
+            capital_gate_verdict="PREVIEW",
+            effective_cap=0.0,
+            state_charges={},
+            position_action="HOLD",
+            quantity=0.0,
+            confidence=float(ensemble.effective_confidence),
+            expected_outcome="",
+            realized_outcome="",
+            pnl=0.0,
+            lesson="",
+        )
+        similar = self._trade_memory.find_similar(preview, top_k=5, min_similarity=0.0)
+
+        if not similar:
+            return {
+                "memory_used": False,
+                "similar_trade_count": 0,
+                "similar_trades": [],
+                "historical_win_rate": 0.0,
+                "avg_pnl": 0.0,
+                "wins": 0,
+                "losses": 0,
+                "lessons": [],
+                "confidence_adjustment": 0.0,
+            }
+
+        closed = [s for s in similar if s.experience.lifecycle_status == TradeLifecycle.CLOSED.value]
+        if not closed:
+            return {
+                "memory_used": True,
+                "similar_trade_count": len(similar),
+                "similar_trades": [],
+                "historical_win_rate": 0.0,
+                "avg_pnl": 0.0,
+                "wins": 0,
+                "losses": 0,
+                "lessons": [],
+                "confidence_adjustment": 0.0,
+            }
+
+        pnls = [s.experience.pnl for s in closed]
+        wins = sum(1 for p in pnls if p > 0)
+        losses = sum(1 for p in pnls if p < 0)
+        win_rate = wins / len(pnls)
+        avg_pnl = sum(pnls) / len(pnls)
+        lessons = [s.experience.lesson for s in closed if s.experience.lesson]
+        unique_lessons = list(dict.fromkeys(lessons))
+        adjustment = max(-0.1, min(0.1, (win_rate - 0.5) * 0.2))
+
+        return {
+            "memory_used": True,
+            "similar_trade_count": len(similar),
+            "similar_trades": [
+                {
+                    "decision_id": s.experience.decision_id,
+                    "symbol": s.experience.symbol,
+                    "action": s.experience.position_action,
+                    "pnl": s.experience.pnl,
+                    "similarity": s.similarity_score,
+                    "market_similarity": s.market_similarity,
+                    "portfolio_similarity": s.portfolio_similarity,
+                }
+                for s in similar
+            ],
+            "historical_win_rate": win_rate,
+            "avg_pnl": avg_pnl,
+            "wins": wins,
+            "losses": losses,
+            "lessons": unique_lessons[:5],
+            "confidence_adjustment": adjustment,
+        }
+
+    def close_trade(
+        self,
+        decision_id: str,
+        realized_outcome: str,
+        pnl: float,
+        lesson: str = "",
+    ) -> TradeExperience:
+        """Finalize a trade and trigger the reputation update (P0-1)."""
+        closed = self._trade_memory.close_trade(
+            decision_id=decision_id,
+            realized_outcome=realized_outcome,
+            pnl=pnl,
+            lesson=lesson,
+        )
+        self._update_reputations(closed)
+        self._audit_log.record_outcome(
+            decision_id=decision_id,
+            symbol=closed.symbol,
+            payload={
+                "pnl": closed.pnl,
+                "realized_outcome": closed.realized_outcome,
+                "lesson": closed.lesson,
+                "lifecycle_status": closed.lifecycle_status,
+            },
+        )
+        return closed
 
     def _classify_regime(
         self, prices: List[float], volumes: Optional[List[float]]
@@ -490,6 +725,7 @@ class XQuantXOrchestrator:
         capital_gate: CapitalGateResult,
         weights: Dict[str, float],
         agent_outputs: List[AgentOutput],
+        historical_context: Optional[Dict[str, Any]] = None,
     ) -> TradingDecision:
         """Make trading decision based on analytical outputs.
 
@@ -497,13 +733,15 @@ class XQuantXOrchestrator:
         1. Check capital gate verdict
         2. Apply risk circuit breakers
         3. Determine position action and size
-        4. Build provenance trace
+        4. Apply memory-derived confidence adjustment (P0-2: bounded +/-10%)
+        5. Build provenance trace
 
         Note: The LLM/interpreter layer may provide hypothesis/lesson context,
         but the deterministic mathematical layer (ensemble → Kalman → capital gate)
         remains the ultimate risk authority. The LLM does not directly modify
         capital gate parameters or override risk controls.
         """
+        historical_context = historical_context or {}
         circuit_breakers: List[str] = []
         reasoning_parts = []
 
@@ -529,6 +767,18 @@ class XQuantXOrchestrator:
             circuit_breakers.append("HIGH_MARKET_ENTROPY")
             reasoning_parts.append("High market entropy detected")
 
+        # P0-2: memory-derived confidence adjustment is bounded ±10% and
+        # explicitly NOT a risk override.
+        memory_used = bool(historical_context.get("memory_used"))
+        if memory_used:
+            adjustment = float(historical_context.get("confidence_adjustment", 0.0))
+            similar_count = int(historical_context.get("similar_trade_count", 0))
+            win_rate = float(historical_context.get("historical_win_rate", 0.0))
+            reasoning_parts.append(
+                f"Memory: {similar_count} similar trades, historical win rate {win_rate:.1%}, "
+                f"confidence adjust {adjustment:+.2%}"
+            )
+
         # Determine action
         if circuit_breakers:
             action = "HOLD"
@@ -536,18 +786,21 @@ class XQuantXOrchestrator:
             confidence = 0.0
         else:
             # Use ensemble signal direction
+            base_confidence = ensemble.effective_confidence
+            if memory_used:
+                base_confidence = max(0.0, min(1.0, base_confidence + float(historical_context.get("confidence_adjustment", 0.0))))
             if ensemble.ensemble_signal > 0.3:
                 action = "BUY"
                 quantity = self._compute_position_size(capital_gate.effective_cap)
-                confidence = ensemble.effective_confidence
+                confidence = base_confidence
             elif ensemble.ensemble_signal < -0.3:
                 action = "SELL"
                 quantity = self._compute_position_size(capital_gate.effective_cap)
-                confidence = ensemble.effective_confidence
+                confidence = base_confidence
             else:
                 action = "HOLD"
                 quantity = 0.0
-                confidence = ensemble.effective_confidence
+                confidence = base_confidence
 
             reasoning_parts.append(
                 f"Ensemble signal: {ensemble.ensemble_signal:.3f}, "
@@ -571,6 +824,10 @@ class XQuantXOrchestrator:
                 "effective_cap": capital_gate.effective_cap,
                 "verdict": verdict.name,
                 "weights": weights,
+                "memory_used": memory_used,
+                "memory_adjustment": float(historical_context.get("confidence_adjustment", 0.0)),
+                "similar_trade_count": int(historical_context.get("similar_trade_count", 0)),
+                "historical_win_rate": float(historical_context.get("historical_win_rate", 0.0)),
             },
         )
 
@@ -581,93 +838,102 @@ class XQuantXOrchestrator:
         return max(0.0, min(1.0, effective_cap))
 
     def _execute_order(self, decision: TradingDecision) -> Optional[Dict[str, Any]]:
-        """Execute trading decision via Alpaca (if enabled).
-
-        Parameters
-        ----------
-        decision : TradingDecision
-            Trading decision to execute.
-
-        Returns
-        -------
-        Optional[Dict[str, Any]]
-            Order result if executed, None if trading disabled or blocked.
-        """
+        """Execute trading decision via Alpaca (if enabled)."""
         if not self._enable_trading:
             return None
 
         if decision.action == "HOLD":
             return None
 
-        # Lazy import of execution module
         try:
             from investment_agent.execution.execution import place_order, get_account_summary
             account = get_account_summary()
-            # Simplified execution - in production would use decision.quantity
             return place_order(
                 symbol=decision.symbol,
                 side=decision.action.lower(),
                 qty=int(decision.quantity) if decision.quantity > 0 else 0,
-                price_per_contract=0.0,  # Would fetch from market data
+                price_per_contract=0.0,
             )
         except Exception as e:
             return {"error": str(e)}
 
-    def _record_experience(
+    def _record_pending_experience(
         self,
         regime: RegimeClassification,
         ensemble: EnsembleAggregate,
         kalman_state: KalmanState,
-        kalman_gain: float,
         capital_gate: CapitalGateResult,
         decision: TradingDecision,
+        agent_outputs: List[AgentOutput],
         order_result: Optional[Dict[str, Any]],
     ) -> TradeExperience:
-        """Record trade experience in memory."""
-        # Build agent signals dict
-        agent_signals = {}
-        for agent_id in self._agent_ids:
-            # Find matching agent output
-            # In production, this would come from the actual agent outputs
-            agent_signals[agent_id] = 0.0
+        """Record a PENDING_FILL experience after order submission (P0-1).
+
+        Returns
+        -------
+        TradeExperience
+            Newly logged PENDING_FILL experience, or REJECTED if the order was
+            rejected by the broker.
+        """
+        agent_signals = {a.agent_id: float(a.s) for a in agent_outputs}
+
+        if order_result is None:
+            status = "PENDING_FILL"
+            order_id = None
+        elif isinstance(order_result, dict) and "error" in order_result:
+            status = TradeLifecycle.REJECTED.value
+            order_id = None
+        else:
+            status = TradeLifecycle.PENDING_FILL.value
+            order_id = None
+            if isinstance(order_result, dict):
+                order_id = order_result.get("id")
 
         experience = TradeExperience(
+            decision_id=decision.decision_id,
             timestamp=datetime.now(),
             symbol=self._symbol,
             regime=regime.regime,
             regime_probabilities=dict(regime.regime_affinity),
             agent_signals=agent_signals,
-            ensemble_signal=ensemble.ensemble_signal,
-            disagreement=ensemble.disagreement,
-            effective_confidence=ensemble.effective_confidence,
-            kalman_gain=kalman_gain,
-            kalman_price=kalman_state.estimated_price,
-            kalman_trend=kalman_state.trend,
+            ensemble_signal=float(ensemble.ensemble_signal),
+            disagreement=float(ensemble.disagreement),
+            effective_confidence=float(ensemble.effective_confidence),
+            kalman_gain=float(kalman_state.price_variance),
+            kalman_price=float(kalman_state.estimated_price),
+            kalman_trend=float(kalman_state.trend),
             capital_gate_verdict=capital_gate.verdict.name,
-            effective_cap=capital_gate.effective_cap,
+            effective_cap=float(capital_gate.effective_cap),
             state_charges=dict(capital_gate.state_charges),
             position_action=decision.action,
-            quantity=decision.quantity,
-            confidence=decision.confidence,
+            quantity=float(decision.quantity),
+            confidence=float(decision.confidence),
             expected_outcome=decision.reasoning,
             realized_outcome="PENDING",
             pnl=0.0,
             lesson="",
+            lifecycle_status=status,
+            order_id=order_id,
+            fill_price=None,
+            closed_at=None,
         )
-
         self._trade_memory.log_experience(experience)
         return experience
 
     def _update_reputations(self, experience: TradeExperience) -> None:
-        """Update agent reputations with trade outcome (if known)."""
-        # Outcome tracking requires realized P&L, which is available after
-        # position closure. This is a placeholder for the feedback loop.
-        if experience.realized_outcome != "PENDING" and experience.pnl != 0.0:
-            was_correct = experience.pnl > 0
-            for agent_id in self._agent_ids:
-                self._reputation_tracker.record_outcome(
-                    agent_id, experience.regime, was_correct
-                )
+        """Update agent reputations with trade outcome (P0-1).
+
+        Only call this for terminal lifecycle (CLOSED or REJECTED).
+        """
+        if experience.lifecycle_status == TradeLifecycle.PENDING_FILL.value:
+            return
+        if experience.lifecycle_status == TradeLifecycle.OPEN.value:
+            return
+        was_correct = experience.pnl > 0
+        for agent_id in self._agent_ids:
+            self._reputation_tracker.record_outcome(
+                agent_id, experience.regime, was_correct
+            )
 
     def get_historical_context(
         self, current_experience: TradeExperience, top_k: int = 5
@@ -742,59 +1008,18 @@ class XQuantXOrchestrator:
         realized_pnl: float,
         realized_outcome: str,
         lesson: str = "",
-    ) -> None:
-        """Learn from a completed trade outcome.
+    ) -> TradeExperience:
+        """Backwards-compatible outcome finalization (P0-1).
 
-        This is the feedback loop: trade → outcome → evaluation → update.
-
-        Parameters
-        ----------
-        experience : TradeExperience
-            The original experience to update.
-        realized_pnl : float
-            Realized profit/loss from the trade.
-        realized_outcome : str
-            Description of the actual outcome.
-        lesson : str
-            Extracted lesson/reflection from this trade.
+        Delegates to ``close_trade`` so the lifecycle becomes CLOSED and the
+        reputation update fires only after realized P&L is known.
         """
-        # Update experience with outcome
-        experience_dict = {
-            "timestamp": experience.timestamp,
-            "symbol": experience.symbol,
-            "regime": experience.regime,
-            "regime_probabilities": experience.regime_probabilities,
-            "agent_signals": experience.agent_signals,
-            "ensemble_signal": experience.ensemble_signal,
-            "disagreement": experience.disagreement,
-            "effective_confidence": experience.effective_confidence,
-            "kalman_gain": experience.kalman_gain,
-            "kalman_price": experience.kalman_price,
-            "kalman_trend": experience.kalman_trend,
-            "capital_gate_verdict": experience.capital_gate_verdict,
-            "effective_cap": experience.effective_cap,
-            "state_charges": experience.state_charges,
-            "position_action": experience.position_action,
-            "quantity": experience.quantity,
-            "confidence": experience.confidence,
-            "expected_outcome": experience.expected_outcome,
-            "realized_outcome": realized_outcome,
-            "pnl": realized_pnl,
-            "lesson": lesson,
-        }
-
-        # Create updated experience
-        updated_experience = TradeExperience(**experience_dict)
-
-        # Update in memory
-        self._trade_memory.log_experience(updated_experience)
-
-        # Update agent reputations based on outcome
-        was_correct = realized_pnl > 0
-        for agent_id in self._agent_ids:
-            self._reputation_tracker.record_outcome(
-                agent_id, experience.regime, was_correct
-            )
+        return self.close_trade(
+            decision_id=experience.decision_id,
+            realized_outcome=realized_outcome,
+            pnl=realized_pnl,
+            lesson=lesson,
+        )
 
     def find_similar_past_trades(
         self, current: TradeExperience, top_k: int = 5
