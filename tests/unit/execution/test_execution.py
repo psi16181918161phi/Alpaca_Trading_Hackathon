@@ -86,5 +86,120 @@ class TestGetOptionContract(unittest.TestCase):
             self.assertEqual(result, fake_contract)
 
 
+class TestGetPositions(unittest.TestCase):
+    def test_returns_empty_list_when_no_positions(self):
+        fake_client = MagicMock()
+        fake_client.get_all_positions.return_value = []
+        with patch.object(execution, "_get_trading_client", return_value=fake_client):
+            self.assertEqual(execution.get_positions(), [])
+
+    def test_maps_position_fields(self):
+        fake_side = MagicMock()
+        fake_side.value = "long"
+        fake_position = MagicMock(
+            symbol="AAPL",
+            side=fake_side,
+            qty="10",
+            avg_entry_price="150.00",
+            current_price="155.00",
+            market_value="1550.00",
+            unrealized_pl="50.00",
+            unrealized_plpc="0.0333",
+        )
+        fake_client = MagicMock()
+        fake_client.get_all_positions.return_value = [fake_position]
+        with patch.object(execution, "_get_trading_client", return_value=fake_client):
+            result = execution.get_positions()
+            self.assertEqual(len(result), 1)
+            self.assertEqual(result[0]["symbol"], "AAPL")
+            self.assertEqual(result[0]["side"], "long")
+            self.assertEqual(result[0]["qty"], 10.0)
+            self.assertEqual(result[0]["unrealized_pl"], 50.0)
+
+    def test_handles_none_optional_fields(self):
+        fake_side = MagicMock()
+        fake_side.value = "short"
+        fake_position = MagicMock(
+            symbol="TSLA",
+            side=fake_side,
+            qty="1",
+            avg_entry_price="200.00",
+            current_price=None,
+            market_value=None,
+            unrealized_pl=None,
+            unrealized_plpc=None,
+        )
+        fake_client = MagicMock()
+        fake_client.get_all_positions.return_value = [fake_position]
+        with patch.object(execution, "_get_trading_client", return_value=fake_client):
+            result = execution.get_positions()
+            self.assertIsNone(result[0]["current_price"])
+            self.assertIsNone(result[0]["unrealized_pl"])
+
+
+class TestGetOrderHistory(unittest.TestCase):
+    def test_returns_empty_list_when_no_orders(self):
+        fake_client = MagicMock()
+        fake_client.get_orders.return_value = []
+        with patch.object(execution, "_get_trading_client", return_value=fake_client):
+            self.assertEqual(execution.get_order_history(), [])
+
+    def test_maps_order_fields(self):
+        fake_side = MagicMock()
+        fake_side.value = "buy"
+        fake_type = MagicMock()
+        fake_type.value = "market"
+        fake_status = MagicMock()
+        fake_status.value = "filled"
+        fake_submitted_at = MagicMock()
+        fake_submitted_at.isoformat.return_value = "2026-08-31T12:00:00"
+        fake_order = MagicMock(
+            id="order-123",
+            submitted_at=fake_submitted_at,
+            symbol="AAPL",
+            side=fake_side,
+            order_type=fake_type,
+            qty="5",
+            filled_qty="5",
+            filled_avg_price="150.25",
+            status=fake_status,
+        )
+        fake_client = MagicMock()
+        fake_client.get_orders.return_value = [fake_order]
+        with patch.object(execution, "_get_trading_client", return_value=fake_client):
+            result = execution.get_order_history()
+            self.assertEqual(len(result), 1)
+            self.assertEqual(result[0]["order_id"], "order-123")
+            self.assertEqual(result[0]["symbol"], "AAPL")
+            self.assertEqual(result[0]["side"], "buy")
+            self.assertEqual(result[0]["status"], "filled")
+            self.assertEqual(result[0]["filled_avg_price"], 150.25)
+
+    def test_handles_missing_submitted_at(self):
+        fake_side = MagicMock()
+        fake_side.value = "sell"
+        fake_type = MagicMock()
+        fake_type.value = "market"
+        fake_status = MagicMock()
+        fake_status.value = "new"
+        fake_order = MagicMock(
+            id="order-456",
+            submitted_at=None,
+            symbol="MSFT",
+            side=fake_side,
+            order_type=fake_type,
+            qty="1",
+            filled_qty=None,
+            filled_avg_price=None,
+            status=fake_status,
+        )
+        fake_client = MagicMock()
+        fake_client.get_orders.return_value = [fake_order]
+        with patch.object(execution, "_get_trading_client", return_value=fake_client):
+            result = execution.get_order_history()
+            self.assertIsNone(result[0]["timestamp"])
+            self.assertIsNone(result[0]["filled_qty"])
+
+
 if __name__ == "__main__":
     unittest.main()
