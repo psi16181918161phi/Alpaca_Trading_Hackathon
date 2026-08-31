@@ -69,12 +69,14 @@ def place_order(symbol, side, qty, price_per_contract):
 
 def get_account_summary():
     """Return current account status and buying power."""
+    client = _get_trading_client()
     account = client.get_account()
     return {"status": account.status, "buying_power": account.buying_power}
 
 
 def get_positions():
     """Return current open positions as plain dicts (read-only, no order submission)."""
+    client = _get_trading_client()
     positions = client.get_all_positions()
     return [
         {
@@ -95,6 +97,7 @@ def get_order_history(limit=100):
     """Return recent orders (submitted/filled/cancelled) as plain dicts (read-only)."""
     from alpaca.trading.requests import GetOrdersRequest
 
+    client = _get_trading_client()
     request = GetOrdersRequest(status="all", limit=limit)
     orders = client.get_orders(request)
     return [

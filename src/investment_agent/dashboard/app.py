@@ -50,7 +50,15 @@ app.index_string = """<!DOCTYPE html>
         <title>{%title%}</title>
         {%favicon%}
         {%css%}
-        <style>body { margin: 0; background-color: """ + colors.BACKGROUND_PRIMARY + """; }</style>
+        <link rel="preconnect" href="https://fonts.googleapis.com">
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link href=\"""" + colors.GOOGLE_FONTS_HREF + """\" rel="stylesheet">
+        <style>
+            body { margin: 0; background-color: """ + colors.BACKGROUND_PRIMARY + """; font-family: """ + colors.FONT_SANS + """; }
+            ::-webkit-scrollbar { width: 10px; height: 10px; }
+            ::-webkit-scrollbar-track { background: """ + colors.BACKGROUND_PRIMARY + """; }
+            ::-webkit-scrollbar-thumb { background: """ + colors.BORDER + """; border-radius: 5px; }
+        </style>
     </head>
     <body>
         {%app_entry%}
@@ -113,7 +121,7 @@ app.layout = html.Div([
     layout.build_header(SESSION_ID, MODE),
     html.Div([
         html.Div(id="sidebar-container"),
-        html.Div(id="panel-content", style={"flex": "1", "padding": "16px"}),
+        html.Div(id="panel-content", style={"flex": "1", "padding": "20px", "minWidth": "0"}),
     ], style={"display": "flex"}),
     layout.build_stop_session_modal(),
 ], style=layout.PAGE_STYLE)

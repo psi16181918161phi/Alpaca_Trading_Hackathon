@@ -88,7 +88,9 @@ class TestGetOptionContract(unittest.TestCase):
 
 class TestGetPositions(unittest.TestCase):
     def test_returns_empty_list_when_no_positions(self):
-        with patch.object(execution.client, "get_all_positions", return_value=[]):
+        fake_client = MagicMock()
+        fake_client.get_all_positions.return_value = []
+        with patch.object(execution, "_get_trading_client", return_value=fake_client):
             self.assertEqual(execution.get_positions(), [])
 
     def test_maps_position_fields(self):
@@ -104,7 +106,9 @@ class TestGetPositions(unittest.TestCase):
             unrealized_pl="50.00",
             unrealized_plpc="0.0333",
         )
-        with patch.object(execution.client, "get_all_positions", return_value=[fake_position]):
+        fake_client = MagicMock()
+        fake_client.get_all_positions.return_value = [fake_position]
+        with patch.object(execution, "_get_trading_client", return_value=fake_client):
             result = execution.get_positions()
             self.assertEqual(len(result), 1)
             self.assertEqual(result[0]["symbol"], "AAPL")
@@ -125,7 +129,9 @@ class TestGetPositions(unittest.TestCase):
             unrealized_pl=None,
             unrealized_plpc=None,
         )
-        with patch.object(execution.client, "get_all_positions", return_value=[fake_position]):
+        fake_client = MagicMock()
+        fake_client.get_all_positions.return_value = [fake_position]
+        with patch.object(execution, "_get_trading_client", return_value=fake_client):
             result = execution.get_positions()
             self.assertIsNone(result[0]["current_price"])
             self.assertIsNone(result[0]["unrealized_pl"])
@@ -133,7 +139,9 @@ class TestGetPositions(unittest.TestCase):
 
 class TestGetOrderHistory(unittest.TestCase):
     def test_returns_empty_list_when_no_orders(self):
-        with patch.object(execution.client, "get_orders", return_value=[]):
+        fake_client = MagicMock()
+        fake_client.get_orders.return_value = []
+        with patch.object(execution, "_get_trading_client", return_value=fake_client):
             self.assertEqual(execution.get_order_history(), [])
 
     def test_maps_order_fields(self):
@@ -156,7 +164,9 @@ class TestGetOrderHistory(unittest.TestCase):
             filled_avg_price="150.25",
             status=fake_status,
         )
-        with patch.object(execution.client, "get_orders", return_value=[fake_order]):
+        fake_client = MagicMock()
+        fake_client.get_orders.return_value = [fake_order]
+        with patch.object(execution, "_get_trading_client", return_value=fake_client):
             result = execution.get_order_history()
             self.assertEqual(len(result), 1)
             self.assertEqual(result[0]["order_id"], "order-123")
@@ -183,7 +193,9 @@ class TestGetOrderHistory(unittest.TestCase):
             filled_avg_price=None,
             status=fake_status,
         )
-        with patch.object(execution.client, "get_orders", return_value=[fake_order]):
+        fake_client = MagicMock()
+        fake_client.get_orders.return_value = [fake_order]
+        with patch.object(execution, "_get_trading_client", return_value=fake_client):
             result = execution.get_order_history()
             self.assertIsNone(result[0]["timestamp"])
             self.assertIsNone(result[0]["filled_qty"])
