@@ -63,6 +63,46 @@ def get_account_summary():
     return {"status": account.status, "buying_power": account.buying_power}
 
 
+def get_positions():
+    """Return current open positions as plain dicts (read-only, no order submission)."""
+    positions = client.get_all_positions()
+    return [
+        {
+            "symbol": p.symbol,
+            "side": p.side.value if hasattr(p.side, "value") else str(p.side),
+            "qty": float(p.qty),
+            "avg_entry_price": float(p.avg_entry_price),
+            "current_price": float(p.current_price) if p.current_price is not None else None,
+            "market_value": float(p.market_value) if p.market_value is not None else None,
+            "unrealized_pl": float(p.unrealized_pl) if p.unrealized_pl is not None else None,
+            "unrealized_plpc": float(p.unrealized_plpc) if p.unrealized_plpc is not None else None,
+        }
+        for p in positions
+    ]
+
+
+def get_order_history(limit=100):
+    """Return recent orders (submitted/filled/cancelled) as plain dicts (read-only)."""
+    from alpaca.trading.requests import GetOrdersRequest
+
+    request = GetOrdersRequest(status="all", limit=limit)
+    orders = client.get_orders(request)
+    return [
+        {
+            "order_id": str(o.id),
+            "timestamp": o.submitted_at.isoformat() if o.submitted_at else None,
+            "symbol": o.symbol,
+            "side": o.side.value if hasattr(o.side, "value") else str(o.side),
+            "type": o.order_type.value if hasattr(o.order_type, "value") else str(o.order_type),
+            "qty": float(o.qty) if o.qty is not None else None,
+            "filled_qty": float(o.filled_qty) if o.filled_qty is not None else None,
+            "filled_avg_price": float(o.filled_avg_price) if o.filled_avg_price is not None else None,
+            "status": o.status.value if hasattr(o.status, "value") else str(o.status),
+        }
+        for o in orders
+    ]
+
+
 if __name__ == "__main__":
     print(get_account_summary())
     contract = get_option_contract("AAPL")
