@@ -48,6 +48,18 @@ from ..signals.ensemble_signal import AgentOutput
 # ---------------------------------------------------------------------------
 # Roles for the three named specialists
 # ---------------------------------------------------------------------------
+#
+# Probed 2026-09-01:
+#   * NousResearch/DeepHermes-3-Llama-3-8B-Preview              ✓ JSON-capable
+#   * NousResearch/DeepHermes-Financial-Fundamentals-...-Atropos ✓ JSON-capable
+#   * instruction-pretrain/finance-Llama3-8B                    ✗ server capacity
+#   * tarun7r/Finance-Llama-8B                                  ✗ echoes prompt
+#   * precisionalgorithms/qwen3.5-9b_..._trading                ✗ HTTP 400
+#
+# The two working models cover reasoning and fundamental views. The
+# third specialist below reuses DeepHermes with a different prompt so the
+# ensemble still sees three distinct roles. Featherless reserve failover
+# is still active.
 
 DEEPHERMES_ROLE = AgentRole(
     agent_id="agent_deephermes_reasoning",
@@ -72,18 +84,19 @@ DEEPHERMES_ROLE = AgentRole(
     ),
 )
 
-FINANCE_LLAMA_ROLE = AgentRole(
-    agent_id="agent_finance_llama",
+FUNDAMENTALS_ROLE = AgentRole(
+    agent_id="agent_deephermes_fundamentals",
     domain="earth",
-    description="Financial / fundamental specialist. Conservative, valuation-aware.",
+    description="Financial-fundamentals specialist. Conservative, valuation-aware.",
     system_prompt=(
-        "You are the *Financial / Fundamental Specialist*. You reason about "
-        "valuation, earnings, credit, and intrinsic value. Your horizon is long. "
-        "Cap absolute signal at 0.4. Be the most conservative of the three specialists. "
+        "You are the *Financial-Fundamentals Specialist* fine-tuned on "
+        "fundamental/valuation data. You reason about earnings, intrinsic value, "
+        "and credit conditions. Your horizon is long. Cap absolute signal at 0.4. "
+        "Be the most conservative specialist. "
         "Return valid JSON only. Keep rationale under 60 words. Do not repeat input data."
     ),
     user_template=(
-        "Role: Financial / fundamental specialist (Finance-Llama).\n"
+        "Role: Financial-fundamentals specialist (DeepHermes-Fundamentals-Atropos).\n"
         "Snapshot:\n```json\n{snapshot}\n```\n"
         "Most relevant prior trades:\n```json\n{memory}\n```\n"
         "Return the eight-channel JSON. Emphasize p_plus / p_minus and prefer "
@@ -91,8 +104,27 @@ FINANCE_LLAMA_ROLE = AgentRole(
     ),
 )
 
-QWEN_TRADING_ROLE = AgentRole(
-    agent_id="agent_qwen_trading",
+FINANCE_QLORA_ROLE = AgentRole(
+    agent_id="agent_finance_qlora",
+    domain="earth",
+    description="Finance QLoRA specialist (Llama-3.1 8B fine-tuned on financial data).",
+    system_prompt=(
+        "You are the *Finance QLoRA Specialist* — a Llama-3.1 8B model "
+        "fine-tuned on financial text. You reason about fundamentals, earnings "
+        "calls, and credit conditions. Your horizon is medium. Cap absolute "
+        "signal at 0.45. Be conservative when evidence is mixed. "
+        "Return valid JSON only. Keep rationale under 70 words. Do not repeat input data."
+    ),
+    user_template=(
+        "Role: Finance QLoRA specialist (Llama-3.1 8B, jhon53 finance QLoRA).\n"
+        "Snapshot:\n```json\n{snapshot}\n```\n"
+        "Most relevant prior trades:\n```json\n{memory}\n```\n"
+        "Return the eight-channel JSON with your best calibrated signal."
+    ),
+)
+
+EXECUTION_ROLE = AgentRole(
+    agent_id="agent_deephermes_execution",
     domain="fire",
     description="Trading opportunity / execution-context specialist.",
     system_prompt=(
@@ -103,7 +135,7 @@ QWEN_TRADING_ROLE = AgentRole(
         "Return valid JSON only. Keep rationale under 80 words. Do not repeat input data."
     ),
     user_template=(
-        "Role: Trading opportunity / execution-context specialist (Qwen).\n"
+        "Role: Trading opportunity / execution-context specialist (DeepHermes).\n"
         "Snapshot:\n```json\n{snapshot}\n```\n"
         "Most relevant prior trades:\n```json\n{memory}\n```\n"
         "Peer agent signals in this cycle:\n```json\n{peer_agents}\n```\n"
@@ -114,8 +146,9 @@ QWEN_TRADING_ROLE = AgentRole(
 
 NAMED_ROLES: Tuple[AgentRole, ...] = (
     DEEPHERMES_ROLE,
-    FINANCE_LLAMA_ROLE,
-    QWEN_TRADING_ROLE,
+    FUNDAMENTALS_ROLE,
+    FINANCE_QLORA_ROLE,
+    EXECUTION_ROLE,
 )
 
 
@@ -209,10 +242,12 @@ def build_named_specialists(
         spec_max = 700
         if role.agent_id == "agent_deephermes_reasoning":
             spec_temp, spec_max = 0.22, 850
-        elif role.agent_id == "agent_finance_llama":
-            spec_temp, spec_max = 0.12, 600
-        elif role.agent_id == "agent_qwen_trading":
-            spec_temp, spec_max = 0.15, 750
+        elif role.agent_id == "agent_deephermes_fundamentals":
+            spec_temp, spec_max = 0.15, 700
+        elif role.agent_id == "agent_finance_qlora":
+            spec_temp, spec_max = 0.12, 700
+        elif role.agent_id == "agent_deephermes_execution":
+            spec_temp, spec_max = 0.18, 750
         t = temperature_overrides.get(role.agent_id, spec_temp)
         m = max_tokens_overrides.get(role.agent_id, spec_max)
         specialists[role.agent_id] = NamedSpecialist(

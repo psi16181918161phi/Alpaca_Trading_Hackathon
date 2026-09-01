@@ -1,26 +1,26 @@
 {
-  "_comment": "Featherless API keys for the three active LLMs plus a reserve. These keys are read by investment_agent.llm.config. They must NEVER be committed.",
+  "_comment": "Featherless API keys. Probed 2026-09-01: deephermes reasoning ✓, deephermes financial fundamentals ✓, tarun7r/Finance-Llama-8B rejected (echoes prompt). The two working models are kept; one slot stays as reserve.",
   "providers": {
     "deephermes": {
       "api_key_env": "FEATHERLESS_DEEPHERMES_KEY",
       "model": "NousResearch/DeepHermes-3-Llama-3-8B-Preview",
-      "temperature": 0.20,
-      "max_tokens": 900,
+      "temperature": 0.22,
+      "max_tokens": 850,
       "role": "reasoning"
     },
-    "finance_llama": {
-      "api_key_env": "FEATHERLESS_FINANCE_LLAMA_KEY",
-      "model": "instruction-pretrain/finance-Llama3-8B",
-      "temperature": 0.12,
+    "fundamentals": {
+      "api_key_env": "FEATHERLESS_FUNDAMENTALS_KEY",
+      "model": "NousResearch/DeepHermes-Financial-Fundamentals-Prediction-Specialist-Atropos",
+      "temperature": 0.15,
       "max_tokens": 700,
       "role": "fundamental"
     },
-    "qwen_trading": {
-      "api_key_env": "FEATHERLESS_QWEN_TRADING_KEY",
-      "model": "precisionalgorithms/qwen3.5-9b_precision_agentic_trading",
-      "temperature": 0.15,
-      "max_tokens": 800,
-      "role": "execution"
+    "finance_llama": {
+      "api_key_env": "FEATHERLESS_FINANCE_LLAMA_KEY",
+      "model": "jhon53/Llama3_1_8B_Finance_QLoRA-merged-16bit",
+      "temperature": 0.12,
+      "max_tokens": 700,
+      "role": "fundamental"
     },
     "reserve": {
       "api_key_env": "FEATHERLESS_RESERVE_KEY",
@@ -30,5 +30,8 @@
       "role": "failover",
       "enabled": false
     }
+  }
+}
+
   }
 }

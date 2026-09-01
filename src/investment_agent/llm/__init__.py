@@ -32,8 +32,9 @@ from .orchestrator import (
 from .snapshot import build_snapshot, pre_screen, PreScreenResult
 from .named import (
     DEEPHERMES_ROLE,
-    FINANCE_LLAMA_ROLE,
-    QWEN_TRADING_ROLE,
+    FUNDAMENTALS_ROLE,
+    FINANCE_QLORA_ROLE,
+    EXECUTION_ROLE,
     NAMED_ROLES,
     NamedSpecialist,
     build_named_specialists,
@@ -60,8 +61,9 @@ __all__ = [
     "PreScreenResult",
     # named specialists
     "DEEPHERMES_ROLE",
-    "FINANCE_LLAMA_ROLE",
-    "QWEN_TRADING_ROLE",
+    "FUNDAMENTALS_ROLE",
+    "FINANCE_QLORA_ROLE",
+    "EXECUTION_ROLE",
     "NAMED_ROLES",
     "NamedSpecialist",
     "build_named_specialists",

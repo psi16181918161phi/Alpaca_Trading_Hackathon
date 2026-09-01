@@ -13,15 +13,15 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", "sr
 from investment_agent.llm import (
     AgentLLMAdapter,
     DEEPHERMES_ROLE,
+    EXECUTION_ROLE,
     FeatherlessOrchestrator,
-    FINANCE_LLAMA_ROLE,
+    FUNDAMENTALS_ROLE,
     LLMResponse,
     MockLLMProvider,
     NAMED_ROLES,
     NamedSpecialist,
     PreScreenResult,
     ProviderSpec,
-    QWEN_TRADING_ROLE,
     UsageLog,
     build_named_specialists,
     build_snapshot,
@@ -240,8 +240,9 @@ class TestNamedSpecialists(unittest.TestCase):
             ids,
             {
                 "agent_deephermes_reasoning",
-                "agent_finance_llama",
-                "agent_qwen_trading",
+                "agent_deephermes_fundamentals",
+                "agent_finance_qlora",
+                "agent_deephermes_execution",
             },
         )
 
@@ -252,7 +253,7 @@ class TestNamedSpecialists(unittest.TestCase):
     def test_build_named_specialists(self):
         provider = MockLLMProvider()
         specialists = build_named_specialists(provider)
-        self.assertEqual(len(specialists), 3)
+        self.assertEqual(len(specialists), 4)
         for name, sp in specialists.items():
             self.assertIsInstance(sp, NamedSpecialist)
             self.assertGreater(sp.max_tokens, 0)
@@ -268,7 +269,7 @@ class TestNamedSpecialists(unittest.TestCase):
         specialists = build_named_specialists(provider)
         snap = build_snapshot("AAPL", [100, 100.5, 101], regime="R01")
         outputs = run_named_specialists(specialists, snap)
-        self.assertEqual(len(outputs), 3)
+        self.assertEqual(len(outputs), 4)
         for aid, out in outputs.items():
             self.assertIsInstance(out, AgentOutput)
             self.assertEqual(out.agent_id, aid)
@@ -281,7 +282,7 @@ class TestNamedSpecialists(unittest.TestCase):
         specialists = build_named_specialists(provider)
         snap = build_snapshot("AAPL", [100, 100.5, 101], regime="R01")
         run_named_specialists(specialists, snap)
-        self.assertEqual(len(captured), 3)
+        self.assertEqual(len(captured), 4)
         for p in captured:
             self.assertIn("Snapshot", p)
             self.assertIn("AAPL", p)
