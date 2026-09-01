@@ -115,6 +115,16 @@ def main() -> int:
     for aid, out in outputs.items():
         print(f"  {aid}: s={out.s:+.3f} c={out.c:.3f} u={out.u:.3f} d={out.d:.3f}")
 
+    print("\n--- named specialists, orchestrator-bound (reserve on hot path) ---")
+    # Same orchestrator, but each specialist now routes through
+    # orchestrator.complete(provider_id=...). The multi-provider
+    # failover chain is on the actual hot path; the reserve is
+    # consulted when an active provider fails.
+    bound_specialists = build_named_specialists(orch)
+    bound_outputs = run_named_specialists(bound_specialists, snapshot)
+    for aid, out in bound_outputs.items():
+        print(f"  {aid}: s={out.s:+.3f} c={out.c:.3f} u={out.u:.3f} d={out.d:.3f}")
+
     total = usage.total_tokens()
     print(f"\nTotal tokens spent during this probe: {total}")
     return 0

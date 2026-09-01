@@ -481,5 +481,455 @@ class TestLoadProviderSpecs(unittest.TestCase):
             del os.environ["FEATHERLESS_API_KEY"]
 
 
+# ---------------------------------------------------------------------------
+# Orchestrator-bound NamedSpecialist
+# ---------------------------------------------------------------------------
+#
+# These tests prove the failover chain the production wiring depends on:
+#
+#     SpecialistAgent.run()
+#         -> orchestrator.complete(provider_id=preferred)
+#         -> [preferred fails]
+#         -> [other active providers tried]
+#         -> [all active fail]
+#         -> [reserve provider]
+#         -> LLMResponse
+#         -> AgentOutput
+#
+# The reserve is only on the hot path when the specialist is bound to
+# the orchestrator with its preferred provider_id. Single-provider
+# mode (the legacy wiring) must keep behaving as before.
+
+def _valid_json_for(signal: float = 0.3, confidence: float = 0.7) -> str:
+    return json.dumps({
+        "signal": signal,
+        "confidence": confidence,
+        "uncertainty": 0.2,
+        "doubt": 0.1,
+        "p_plus": 0.6,
+        "p_minus": 0.3,
+        "delta_t": 1.0,
+        "noise": 0.3,
+    })
+
+
+class _RecordingProvider:
+    """Fake provider that records which provider_id it served."""
+
+    def __init__(self, provider_id: str, responses, model: str = "fake") -> None:
+        self._provider_id = provider_id
+        self._responses = list(responses)
+        self._model_id = model
+        self.calls: List[Dict[str, Any]] = []
+
+    @property
+    def model_id(self) -> str:
+        return self._model_id
+
+    def complete(self, prompt, **kwargs):
+        self.calls.append({"prompt": prompt, "kwargs": kwargs, "provider_id": self._provider_id})
+        if not self._responses:
+            raise RuntimeError(f"{self._provider_id}: no scripted responses left")
+        item = self._responses.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        if isinstance(item, str):
+            return LLMResponse(
+                text=item, model=self._model_id,
+                latency_ms=1.0, prompt_tokens=10, completion_tokens=5,
+            )
+        return item
+
+
+def _build_orchestrator_with_providers(specs, providers):
+    """Helper: build a FeatherlessOrchestrator and inject scripted providers."""
+    orch = FeatherlessOrchestrator(
+        specs,
+        usage_log=UsageLog(log_file=os.path.join(tempfile.mkdtemp(), "u.jsonl")),
+        retries_per_provider=1,
+        backoff_s=0.0,
+    )
+    for pid, prov in providers.items():
+        orch._providers[pid] = prov
+    return orch
+
+
+class TestNamedSpecialistOrchestratorBound(unittest.TestCase):
+    """End-to-end tests: specialist -> orchestrator -> reserve."""
+
+    def setUp(self):
+        self.snapshot = build_snapshot("AAPL", [100, 100.5, 101], regime="R01")
+
+    # ---- mode plumbing ----
+
+    def test_requires_provider_or_orchestrator(self):
+        with self.assertRaises(ValueError):
+            NamedSpecialist(role=DEEPHERMES_REASONING_ROLE)
+
+    def test_orchestrator_mode_requires_provider_id(self):
+        from investment_agent.llm import FeatherlessOrchestrator, ProviderSpec
+        orch = FeatherlessOrchestrator([
+            ProviderSpec("deephermes", "k", "m", 0.1, 100, "default"),
+        ])
+        with self.assertRaises(ValueError):
+            NamedSpecialist(role=DEEPHERMES_REASONING_ROLE, orchestrator=orch)
+
+    def test_build_named_specialists_orchestrator_mode_default_mapping(self):
+        deephermes = _RecordingProvider("deephermes", [_valid_json_for(0.1)])
+        fundamentals = _RecordingProvider("fundamentals", [_valid_json_for(0.2)])
+        finance_qlora = _RecordingProvider("finance_qlora", [_valid_json_for(0.3)])
+        orch = _build_orchestrator_with_providers(
+            [
+                ProviderSpec("deephermes", "k1", "m1", 0.15, 700, "default"),
+                ProviderSpec("fundamentals", "k2", "m2", 0.15, 700, "default"),
+                ProviderSpec("finance_qlora", "k3", "m3", 0.15, 700, "default"),
+            ],
+            {
+                "deephermes": deephermes,
+                "fundamentals": fundamentals,
+                "finance_qlora": finance_qlora,
+            },
+        )
+        specialists = build_named_specialists(orch)
+        self.assertEqual(
+            set(specialists.keys()),
+            {
+                "agent_deephermes_reasoning",
+                "agent_deephermes_fundamentals",
+                "agent_finance_qlora",
+            },
+        )
+        for sp in specialists.values():
+            self.assertTrue(sp.is_orchestrator_bound)
+            self.assertIs(sp.orchestrator, orch)
+
+    def test_build_named_specialists_orchestrator_mode_provider_id_map_required(self):
+        deephermes = _RecordingProvider("deephermes", [_valid_json_for()])
+        orch = _build_orchestrator_with_providers(
+            [ProviderSpec("deephermes", "k", "m", 0.15, 700, "default")],
+            {"deephermes": deephermes},
+        )
+        with self.assertRaises(ValueError):
+            # finance_qlora + fundamentals not in the map -> ValueError
+            build_named_specialists(
+                orch,
+                provider_id_map={"agent_deephermes_reasoning": "deephermes"},
+            )
+
+    # ---- the headline behaviour ----
+
+    def test_finance_qlora_fails_reserve_attempted_returns_valid_output(self):
+        """Headline test.
+
+        Production path:
+            finance_qlora provider fails
+              -> orchestrator detects failure
+              -> reserve is attempted
+              -> valid AgentOutput returned
+        Starting from NamedSpecialist.run(), not from orchestrator.complete()
+        in isolation.
+
+        The orchestrator's existing provider-ordering policy walks all
+        active providers before reaching the reserve, so to prove the
+        reserve is on the actual hot path we make every active provider
+        fail and only the reserve succeed. The specialist still calls
+        ``orchestrator.complete(provider_id="finance_qlora", ...)`` and
+        the orchestrator's own policy decides to walk through the
+        remaining actives and finally the reserve.
+        """
+        deephermes = _RecordingProvider("deephermes", [RuntimeError("d down")])
+        fundamentals = _RecordingProvider("fundamentals", [RuntimeError("f down")])
+        finance_qlora = _RecordingProvider(
+            "finance_qlora", [RuntimeError("finance_qlora down")],
+        )
+        reserve = _RecordingProvider("reserve", [_valid_json_for(0.55, 0.88)])
+
+        orch = _build_orchestrator_with_providers(
+            [
+                ProviderSpec("deephermes", "k1", "m1", 0.15, 700, "default"),
+                ProviderSpec("fundamentals", "k2", "m2", 0.15, 700, "default"),
+                ProviderSpec("finance_qlora", "k3", "m3", 0.15, 700, "default"),
+                ProviderSpec("reserve", "k4", "m4", 0.15, 700, "failover", is_reserve=True),
+            ],
+            {
+                "deephermes": deephermes,
+                "fundamentals": fundamentals,
+                "finance_qlora": finance_qlora,
+                "reserve": reserve,
+            },
+        )
+
+        specialists = build_named_specialists(orch)
+        sp_fq = specialists["agent_finance_qlora"]
+        result = sp_fq.run(self.snapshot)
+
+        # The finance_qlora provider was attempted (preferred first).
+        self.assertEqual(len(finance_qlora.calls), 1)
+        # The other actives were also attempted (orchestrator's existing
+        # ordering walks all actives before reserve).
+        self.assertEqual(len(deephermes.calls), 1)
+        self.assertEqual(len(fundamentals.calls), 1)
+        # The reserve provider was actually called.
+        self.assertEqual(len(reserve.calls), 1)
+        # The reserve returned a valid JSON, not a zero-signal fallback.
+        self.assertIsInstance(result, SpecialistOutput)
+        self.assertIsInstance(result.output, AgentOutput)
+        self.assertEqual(result.output.agent_id, "agent_finance_qlora")
+        # signal 0.55 came from the reserve's canned response.
+        self.assertAlmostEqual(result.output.s, 0.55, places=4)
+        self.assertAlmostEqual(result.output.c, 0.88, places=4)
+        # And the raw_text reflects the reserve response, not a fallback.
+        self.assertIn("0.55", result.raw_text)
+
+    def test_preferred_provider_succeeds_reserve_not_called(self):
+        deephermes = _RecordingProvider("deephermes", [_valid_json_for(0.1)])
+        fundamentals = _RecordingProvider("fundamentals", [_valid_json_for(0.2)])
+        finance_qlora = _RecordingProvider("finance_qlora", [_valid_json_for(0.3)])
+        reserve = _RecordingProvider("reserve", [_valid_json_for(0.99)])
+
+        orch = _build_orchestrator_with_providers(
+            [
+                ProviderSpec("deephermes", "k1", "m1", 0.15, 700, "default"),
+                ProviderSpec("fundamentals", "k2", "m2", 0.15, 700, "default"),
+                ProviderSpec("finance_qlora", "k3", "m3", 0.15, 700, "default"),
+                ProviderSpec("reserve", "k4", "m4", 0.15, 700, "failover", is_reserve=True),
+            ],
+            {
+                "deephermes": deephermes,
+                "fundamentals": fundamentals,
+                "finance_qlora": finance_qlora,
+                "reserve": reserve,
+            },
+        )
+        specialists = build_named_specialists(orch)
+        out = run_named_specialists(specialists, self.snapshot)
+
+        # Each preferred provider answered directly.
+        self.assertAlmostEqual(out["agent_deephermes_reasoning"].s, 0.1, places=4)
+        self.assertAlmostEqual(out["agent_deephermes_fundamentals"].s, 0.2, places=4)
+        self.assertAlmostEqual(out["agent_finance_qlora"].s, 0.3, places=4)
+        # Reserve was never touched.
+        self.assertEqual(len(reserve.calls), 0)
+
+    def test_all_active_providers_fail_reserve_attempted(self):
+        deephermes = _RecordingProvider("deephermes", [RuntimeError("d down")])
+        fundamentals = _RecordingProvider("fundamentals", [RuntimeError("f down")])
+        finance_qlora = _RecordingProvider("finance_qlora", [RuntimeError("q down")])
+        reserve = _RecordingProvider("reserve", [
+            _valid_json_for(0.77), _valid_json_for(0.77), _valid_json_for(0.77),
+        ])
+
+        orch = _build_orchestrator_with_providers(
+            [
+                ProviderSpec("deephermes", "k1", "m1", 0.15, 700, "default"),
+                ProviderSpec("fundamentals", "k2", "m2", 0.15, 700, "default"),
+                ProviderSpec("finance_qlora", "k3", "m3", 0.15, 700, "default"),
+                ProviderSpec("reserve", "k4", "m4", 0.15, 700, "failover", is_reserve=True),
+            ],
+            {
+                "deephermes": deephermes,
+                "fundamentals": fundamentals,
+                "finance_qlora": finance_qlora,
+                "reserve": reserve,
+            },
+        )
+        specialists = build_named_specialists(orch)
+        out = run_named_specialists(specialists, self.snapshot)
+
+        # All three preferred providers were attempted by their own
+        # specialists, and the orchestrator's existing ordering walked
+        # through the remaining actives for each call, so each active
+        # was hit 3 times in total.
+        self.assertEqual(len(deephermes.calls), 3)
+        self.assertEqual(len(fundamentals.calls), 3)
+        self.assertEqual(len(finance_qlora.calls), 3)
+        # Reserve was tried once per specialist (3 total) and answered
+        # all three with a real signal.
+        self.assertEqual(len(reserve.calls), 3)
+        # Each specialist's output is a real reserve signal, not zero.
+        for aid in ("agent_deephermes_reasoning",
+                    "agent_deephermes_fundamentals",
+                    "agent_finance_qlora"):
+            self.assertAlmostEqual(out[aid].s, 0.77, places=4)
+            self.assertEqual(out[aid].agent_id, aid)
+
+    def test_all_providers_including_reserve_fail_returns_zero_signal(self):
+        deephermes = _RecordingProvider("deephermes", [RuntimeError("d down")])
+        fundamentals = _RecordingProvider("fundamentals", [RuntimeError("f down")])
+        finance_qlora = _RecordingProvider("finance_qlora", [RuntimeError("q down")])
+        reserve = _RecordingProvider("reserve", [RuntimeError("r down")])
+
+        orch = _build_orchestrator_with_providers(
+            [
+                ProviderSpec("deephermes", "k1", "m1", 0.15, 700, "default"),
+                ProviderSpec("fundamentals", "k2", "m2", 0.15, 700, "default"),
+                ProviderSpec("finance_qlora", "k3", "m3", 0.15, 700, "default"),
+                ProviderSpec("reserve", "k4", "m4", 0.15, 700, "failover", is_reserve=True),
+            ],
+            {
+                "deephermes": deephermes,
+                "fundamentals": fundamentals,
+                "finance_qlora": finance_qlora,
+                "reserve": reserve,
+            },
+        )
+        specialists = build_named_specialists(orch)
+        out = run_named_specialists(specialists, self.snapshot)
+
+        # run_named_specialists catches the orchestrator's RuntimeError and
+        # returns the deterministic zero-signal fallback per specialist.
+        for aid, o in out.items():
+            self.assertEqual(o.s, 0.0)
+            self.assertEqual(o.c, 0.25)
+            self.assertEqual(o.u, 0.75)
+            self.assertEqual(o.agent_id, aid)
+
+    def test_each_specialist_uses_its_own_provider_id(self):
+        """No cross-talk: each specialist hits its own preferred provider."""
+        deephermes = _RecordingProvider("deephermes", [_valid_json_for(0.11)])
+        fundamentals = _RecordingProvider("fundamentals", [_valid_json_for(0.22)])
+        finance_qlora = _RecordingProvider("finance_qlora", [_valid_json_for(0.33)])
+        reserve = _RecordingProvider("reserve", [_valid_json_for(0.99)])
+
+        orch = _build_orchestrator_with_providers(
+            [
+                ProviderSpec("deephermes", "k1", "m1", 0.15, 700, "default"),
+                ProviderSpec("fundamentals", "k2", "m2", 0.15, 700, "default"),
+                ProviderSpec("finance_qlora", "k3", "m3", 0.15, 700, "default"),
+                ProviderSpec("reserve", "k4", "m4", 0.15, 700, "failover", is_reserve=True),
+            ],
+            {
+                "deephermes": deephermes,
+                "fundamentals": fundamentals,
+                "finance_qlora": finance_qlora,
+                "reserve": reserve,
+            },
+        )
+        specialists = build_named_specialists(orch)
+        run_named_specialists(specialists, self.snapshot)
+
+        # Each preferred provider was called exactly once.
+        self.assertEqual(len(deephermes.calls), 1)
+        self.assertEqual(len(fundamentals.calls), 1)
+        self.assertEqual(len(finance_qlora.calls), 1)
+        # Reserve was not touched.
+        self.assertEqual(len(reserve.calls), 0)
+        # Cross-check: each call carried the correct provider_id.
+        for prov in (deephermes, fundamentals, finance_qlora):
+            self.assertEqual(prov.calls[0]["provider_id"], prov._provider_id)
+
+    def test_one_specialist_failure_does_not_corrupt_others(self):
+        """finance_qlora fails -> reserve answers; the other two are untouched."""
+        deephermes = _RecordingProvider("deephermes", [_valid_json_for(0.1)])
+        fundamentals = _RecordingProvider("fundamentals", [_valid_json_for(0.2)])
+        finance_qlora = _RecordingProvider(
+            "finance_qlora", [RuntimeError("q down")],
+        )
+        reserve = _RecordingProvider("reserve", [_valid_json_for(0.5, 0.9)])
+
+        orch = _build_orchestrator_with_providers(
+            [
+                ProviderSpec("deephermes", "k1", "m1", 0.15, 700, "default"),
+                ProviderSpec("fundamentals", "k2", "m2", 0.15, 700, "default"),
+                ProviderSpec("finance_qlora", "k3", "m3", 0.15, 700, "default"),
+                ProviderSpec("reserve", "k4", "m4", 0.15, 700, "failover", is_reserve=True),
+            ],
+            {
+                "deephermes": deephermes,
+                "fundamentals": fundamentals,
+                "finance_qlora": finance_qlora,
+                "reserve": reserve,
+            },
+        )
+        specialists = build_named_specialists(orch)
+        out = run_named_specialists(specialists, self.snapshot)
+
+        # The two healthy specialists are unaffected.
+        self.assertAlmostEqual(out["agent_deephermes_reasoning"].s, 0.1, places=4)
+        self.assertAlmostEqual(out["agent_deephermes_fundamentals"].s, 0.2, places=4)
+        # finance_qlora was answered by the reserve, not the zero-signal fallback.
+        self.assertAlmostEqual(out["agent_finance_qlora"].s, 0.5, places=4)
+        self.assertAlmostEqual(out["agent_finance_qlora"].c, 0.9, places=4)
+        # Sanity: each output still carries the correct agent_id.
+        for aid, o in out.items():
+            self.assertEqual(o.agent_id, aid)
+
+    def test_existing_eight_channel_output_contract_unchanged(self):
+        """The orchestrator-bound path returns the same AgentOutput contract."""
+        deephermes = _RecordingProvider("deephermes", [_valid_json_for(0.42, 0.81)])
+        fundamentals = _RecordingProvider("fundamentals", [_valid_json_for(0.43, 0.82)])
+        finance_qlora = _RecordingProvider("finance_qlora", [_valid_json_for(0.44, 0.83)])
+        reserve = _RecordingProvider("reserve", [_valid_json_for(0.99)])
+
+        orch = _build_orchestrator_with_providers(
+            [
+                ProviderSpec("deephermes", "k1", "m1", 0.15, 700, "default"),
+                ProviderSpec("fundamentals", "k2", "m2", 0.15, 700, "default"),
+                ProviderSpec("finance_qlora", "k3", "m3", 0.15, 700, "default"),
+                ProviderSpec("reserve", "k4", "m4", 0.15, 700, "failover", is_reserve=True),
+            ],
+            {
+                "deephermes": deephermes,
+                "fundamentals": fundamentals,
+                "finance_qlora": finance_qlora,
+                "reserve": reserve,
+            },
+        )
+        specialists = build_named_specialists(orch)
+        out = run_named_specialists(specialists, self.snapshot)
+
+        for aid, o in out.items():
+            self.assertIsInstance(o, AgentOutput)
+            self.assertEqual(o.agent_id, aid)
+            for channel in ("s", "c", "u", "d", "p_plus", "p_minus", "delta_t", "r"):
+                self.assertTrue(hasattr(o, channel))
+            self.assertGreater(o.c, 0.0)
+            self.assertLessEqual(o.c, 1.0)
+
+    def test_specialist_routes_via_orchestrator_provider_id(self):
+        """Confirm the orchestrator receives the specialist's preferred provider_id."""
+        deephermes = _RecordingProvider("deephermes", [_valid_json_for(0.1)])
+        fundamentals = _RecordingProvider("fundamentals", [_valid_json_for(0.2)])
+        finance_qlora = _RecordingProvider("finance_qlora", [_valid_json_for(0.3)])
+        orch = _build_orchestrator_with_providers(
+            [
+                ProviderSpec("deephermes", "k1", "m1", 0.15, 700, "default"),
+                ProviderSpec("fundamentals", "k2", "m2", 0.15, 700, "default"),
+                ProviderSpec("finance_qlora", "k3", "m3", 0.15, 700, "default"),
+            ],
+            {
+                "deephermes": deephermes,
+                "fundamentals": fundamentals,
+                "finance_qlora": finance_qlora,
+            },
+        )
+        specialists = build_named_specialists(orch)
+        run_named_specialists(specialists, self.snapshot)
+
+        # The orchestrator's _provider_order used the specialist's
+        # preferred id. Each active provider was called exactly once.
+        self.assertEqual(deephermes.calls[0]["provider_id"], "deephermes")
+        self.assertEqual(fundamentals.calls[0]["provider_id"], "fundamentals")
+        self.assertEqual(finance_qlora.calls[0]["provider_id"], "finance_qlora")
+
+    def test_single_provider_mode_unchanged(self):
+        """Legacy single-provider wiring must still work and still degrade to fallback."""
+        class Boom:
+            @property
+            def model_id(self): return "boom"
+            def complete(self, *a, **k): raise RuntimeError("legacy outage")
+
+        provider_map = {
+            "agent_deephermes_reasoning": Boom(),
+            "agent_deephermes_fundamentals": Boom(),
+            "agent_finance_qlora": Boom(),
+        }
+        specialists = build_named_specialists(provider_map)
+        out = run_named_specialists(specialists, self.snapshot)
+        for o in out.values():
+            self.assertEqual(o.s, 0.0)
+            self.assertEqual(o.c, 0.25)
+
+
 if __name__ == "__main__":
     unittest.main()

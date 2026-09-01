@@ -13,17 +13,24 @@ Implements the three production LLM specialists confirmed by live probe on
   -> ``jhon53/Llama3_1_8B_Finance_QLoRA-merged-16bit``
 
 The reserve is held by ``FeatherlessOrchestrator`` and is *not* a named
-specialist. It is consulted only when the active provider for a
+specialist. It is consulted only when every active provider for a
 specialist fails (capacity_exhausted, HTTP 400, timeout, etc.).
 
-Each specialist is bound to its own ``LLMProvider`` instance so that:
+Two wiring modes are supported:
 
-  reasoning    -> deephermes provider
-  fundamentals -> fundamentals provider
-  finance_qlora -> finance_qlora provider
+1. ``build_named_specialists(provider_map)``
+   Each specialist is bound to its own single ``LLMProvider`` instance.
+   Provider failures are caught by the adapter and degrade to a
+   zero-signal ``AgentOutput``. Use this when you have no multi-key
+   orchestrator.
 
-Provider failover for a single specialist stays inside its bound
-provider; the multi-provider reserve is the last line of defence.
+2. ``build_named_specialists(orchestrator, provider_id_map=...)``
+   Each specialist is bound to a ``FeatherlessOrchestrator`` plus a
+   ``provider_id``. The specialist calls
+   ``orchestrator.complete(provider_id=..., ...)``, which puts the
+   multi-provider failover (active → active → reserve) on the actual
+   hot path. The deterministic pipeline only sees the zero-signal
+   fallback if the entire orchestrator (including reserve) fails.
 
 WHY
 ====
@@ -36,14 +43,21 @@ WHY
   eight-channel ``AgentOutput`` so the ensemble downstream is
   model-agnostic. A separate ``rationale`` field is attached *outside*
   the eight channels so the contract stays semantically clean.
+- Mode 2 makes the orchestrator's reserve the *last* line of defence
+  instead of dead code. A failure of one provider is followed by
+  failover through the orchestrator's existing retry / reserve
+  policy rather than a silent zero-signal.
 
 HOW
 ====
-- ``NamedSpecialist`` wraps a single ``LLMProvider`` plus a role-specific
-  ``AgentRole`` (system prompt + user template).
+- ``NamedSpecialist`` wraps an ``LLMProvider`` (or the multi-provider
+  ``FeatherlessOrchestrator`` plus a preferred ``provider_id``) plus a
+  role-specific ``AgentRole`` (system prompt + user template).
 - The user template renders the compact snapshot, not raw history.
 - ``build_named_specialists(provider_map)`` builds the three specialists
-  from a ``{agent_id: LLMProvider}`` map.
+  from a ``{agent_id: LLMProvider}`` map (single-provider mode).
+- ``build_named_specialists(orchestrator, provider_id_map=...)`` builds
+  the three specialists in orchestrator-bound mode.
 - ``run_named_specialists(specialists, snapshot, ...)`` returns
   ``{agent_id: AgentOutput}`` with each output containing the eight
   channels; a separate ``rationale`` string is provided by the adapter
@@ -54,7 +68,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple, Union
 
 from .adapter import AgentLLMAdapter
 from .base import LLMProvider, LLMResponse
@@ -175,25 +189,60 @@ class SpecialistOutput:
 class NamedSpecialist:
     """Single named Featherless specialist.
 
-    Bound to ONE ``LLMProvider`` instance (not the full multi-provider
-    orchestrator). The provider may itself implement internal retries;
-    the specialist layer treats any provider failure as a fallback to a
-    zero-signal ``AgentOutput``.
+    Two wiring modes (mutually exclusive):
+
+    * Single-provider mode (legacy / no orchestrator): pass ``provider``
+      as a single ``LLMProvider``. Failures degrade to a zero-signal
+      ``AgentOutput`` via the adapter.
+
+    * Orchestrator-bound mode (production / reserve reachable): pass
+      ``orchestrator`` as a ``FeatherlessOrchestrator`` and
+      ``provider_id`` as the preferred provider id (e.g. ``deephermes``).
+      The specialist calls
+      ``orchestrator.complete(provider_id=..., ...)`` so the
+      orchestrator's existing retry / failover / reserve policy is the
+      actual control flow. A single-provider ``provider`` argument is
+      optional in this mode and is used only to populate the audit
+      trail with the preferred model id.
     """
 
     role: AgentRole
-    provider: LLMProvider
+    provider: Optional[LLMProvider] = None
+    orchestrator: Optional[Any] = None
+    provider_id: Optional[str] = None
     adapter: AgentLLMAdapter = field(init=False)
     temperature: float = DEFAULT_TEMPERATURE
     max_tokens: int = DEFAULT_MAX_TOKENS
 
     def __post_init__(self) -> None:
-        # ``frozen=True`` requires object.__setattr__ in __post_init__.
+        # Mutually exclusive wiring.
+        if self.provider is None and self.orchestrator is None:
+            raise ValueError(
+                "NamedSpecialist requires either a single provider (provider=...) "
+                "or an orchestrator (orchestrator=...) plus provider_id=..."
+            )
+        if self.orchestrator is not None and self.provider_id is None:
+            raise ValueError(
+                "NamedSpecialist: orchestrator-bound mode requires provider_id=..."
+            )
+
+        # Pick the adapter's underlying provider. In orchestrator-bound
+        # mode we still hand the adapter the orchestrator as a generic
+        # ``LLMProvider``-shaped object so the call can take the
+        # orchestrator's failover path. (The orchestrator exposes a
+        # ``complete()`` matching the LLMProvider contract; in
+        # orchestrator-bound mode we call the orchestrator's
+        # ``complete(provider_id=..., ...)`` directly from ``run`` and
+        # only use the adapter for JSON parsing.)
+        if self.orchestrator is not None:
+            underlying = self.orchestrator
+        else:
+            underlying = self.provider
         object.__setattr__(
             self,
             "adapter",
             AgentLLMAdapter(
-                provider=self.provider,
+                provider=underlying,
                 agent_id=self.role.agent_id,
                 fallback_signal=0.0,
                 fallback_confidence=0.25,
@@ -204,26 +253,61 @@ class NamedSpecialist:
     def agent_id(self) -> str:
         return self.role.agent_id
 
+    @property
+    def is_orchestrator_bound(self) -> bool:
+        return self.orchestrator is not None
+
     def run(
         self,
         snapshot: Dict[str, Any],
         memory: Optional[List[Any]] = None,
         peer_agents: Optional[Dict[str, Dict[str, float]]] = None,
     ) -> SpecialistOutput:
-        """Run the specialist and return ``SpecialistOutput``."""
+        """Run the specialist and return ``SpecialistOutput``.
+
+        In orchestrator-bound mode this routes through
+        ``orchestrator.complete(provider_id=self.provider_id, ...)`` so
+        the orchestrator's reserve failover is on the actual hot path.
+        In single-provider mode this delegates to
+        ``self.provider.complete(...)`` and the adapter handles parse
+        failures.
+        """
         prompt = self._build_prompt(snapshot, memory or [], peer_agents or {})
-        output, response = self.adapter.call(
-            prompt,
-            system=self.role.system_prompt,
-            temperature=self.temperature,
-            max_tokens=self.max_tokens,
-        )
+        if self.is_orchestrator_bound:
+            response = self.orchestrator.complete(
+                prompt,
+                provider_id=self.provider_id,
+                system=self.role.system_prompt,
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+            )
+        else:
+            response = self.provider.complete(
+                prompt,
+                system=self.role.system_prompt,
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+            )
+        # Parse using the adapter so the eight-channel contract and the
+        # fallback on malformed JSON are uniform across both modes.
+        output = self._parse_response(response)
         rationale = _extract_rationale(response.text)
         return SpecialistOutput(
             output=output,
             rationale=rationale,
             raw_text=response.text,
         )
+
+    def _parse_response(self, response: LLMResponse) -> AgentOutput:
+        from .adapter import extract_json_object  # local import to avoid cycle
+        parsed = extract_json_object(response.text)
+        if parsed is None:
+            return AgentOutput(
+                s=0.0, c=0.25, u=0.75, d=0.5,
+                p_plus=0.5, p_minus=0.5, delta_t=1.0, r=0.5,
+                agent_id=self.agent_id,
+            )
+        return self.adapter._build_output(parsed)  # noqa: SLF001 - internal helper
 
     def _build_prompt(
         self,
@@ -273,28 +357,48 @@ def _extract_rationale(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Builder
+# Builders
 # ---------------------------------------------------------------------------
 
 def build_named_specialists(
-    provider_map: Mapping[str, LLMProvider],
+    provider_or_orchestrator: Union[LLMProvider, Any, Mapping[str, LLMProvider]],
     *,
+    provider_id_map: Optional[Mapping[str, str]] = None,
     roles: Tuple[AgentRole, ...] = NAMED_ROLES,
     temperature_overrides: Optional[Dict[str, float]] = None,
     max_tokens_overrides: Optional[Dict[str, int]] = None,
+    per_agent_provider: Optional[LLMProvider] = None,
 ) -> Dict[str, NamedSpecialist]:
-    """Build the three named specialists from a per-agent provider map.
+    """Build the three named specialists.
+
+    Two modes:
+
+    1. ``build_named_specialists(provider_map)`` -- single-provider mode.
+       ``provider_or_orchestrator`` is a ``Mapping[agent_id, LLMProvider]``.
+       Each specialist is bound to its own provider; failures degrade
+       to a zero-signal ``AgentOutput`` via the adapter.
+
+    2. ``build_named_specialists(orchestrator, provider_id_map=...)`` --
+       orchestrator-bound mode.
+       ``provider_or_orchestrator`` is a ``FeatherlessOrchestrator``.
+       ``provider_id_map`` maps ``agent_id -> provider_id`` (defaults
+       to ``{reasoning: deephermes, fundamentals: fundamentals,
+       finance_qlora: finance_qlora}``). Each specialist routes
+       through the orchestrator's multi-provider failover, so the
+       reserve provider is reached whenever the active provider fails.
 
     Parameters
     ----------
-    provider_map : Mapping[str, LLMProvider]
-        ``{agent_id: LLMProvider}``. Each specialist is bound to its own
-        provider instance; the keys must match ``role.agent_id``.
-    roles : Tuple[AgentRole, ...]
-        The set of roles to instantiate. Defaults to the three confirmed
-        specialists.
-    temperature_overrides, max_tokens_overrides : Optional[Dict[str, ...]]
-        Per-agent override maps for fine tuning.
+    provider_or_orchestrator : Union[Mapping, FeatherlessOrchestrator]
+        Either a ``{agent_id: LLMProvider}`` map or a
+        ``FeatherlessOrchestrator``.
+    provider_id_map : Optional[Mapping[str, str]]
+        Required in orchestrator-bound mode; ignored otherwise.
+    per_agent_provider : Optional[LLMProvider]
+        Optional. In orchestrator-bound mode this is the *preferred*
+        provider instance for the audit trail (e.g. the matching
+        ``FeatherlessProvider`` from
+        ``build_provider_map_from_orchestrator(orch)``).
 
     Returns
     -------
@@ -303,13 +407,60 @@ def build_named_specialists(
     """
     temperature_overrides = temperature_overrides or {}
     max_tokens_overrides = max_tokens_overrides or {}
-    specialists: Dict[str, NamedSpecialist] = {}
-    missing: List[str] = []
+
+    # Orchestrator-bound mode: caller passed a FeatherlessOrchestrator.
+    if not isinstance(provider_or_orchestrator, Mapping):
+        orchestrator = provider_or_orchestrator
+        if provider_id_map is None:
+            provider_id_map = {
+                "agent_deephermes_reasoning": "deephermes",
+                "agent_deephermes_fundamentals": "fundamentals",
+                "agent_finance_qlora": "finance_qlora",
+            }
+        specialists: Dict[str, NamedSpecialist] = {}
+        missing: List[str] = []
+        for role in roles:
+            pid = provider_id_map.get(role.agent_id)
+            if pid is None:
+                missing.append(role.agent_id)
+                continue
+            spec_temp, spec_max = _ROLE_DEFAULTS.get(
+                role.agent_id, (DEFAULT_TEMPERATURE, DEFAULT_MAX_TOKENS)
+            )
+            t = temperature_overrides.get(role.agent_id, spec_temp)
+            m = max_tokens_overrides.get(role.agent_id, spec_max)
+            # Optional audit-trail provider (single provider instance,
+            # only used to surface the preferred model id in logs).
+            preferred_provider = None
+            if per_agent_provider is not None and role.agent_id == per_agent_provider.model_id:
+                preferred_provider = per_agent_provider
+            specialists[role.agent_id] = NamedSpecialist(
+                role=role,
+                provider=preferred_provider,
+                orchestrator=orchestrator,
+                provider_id=pid,
+                temperature=t,
+                max_tokens=m,
+            )
+        if missing:
+            raise ValueError(
+                f"build_named_specialists (orchestrator mode): provider_id_map "
+                f"missing entries for: {missing}. Required keys: "
+                f"{[r.agent_id for r in roles]}."
+            )
+        return specialists
+
+    # Single-provider mode.
+    provider_map = provider_or_orchestrator
+    specialists = {}
+    missing = []
     for role in roles:
         if role.agent_id not in provider_map:
             missing.append(role.agent_id)
             continue
-        spec_temp, spec_max = _ROLE_DEFAULTS.get(role.agent_id, (DEFAULT_TEMPERATURE, DEFAULT_MAX_TOKENS))
+        spec_temp, spec_max = _ROLE_DEFAULTS.get(
+            role.agent_id, (DEFAULT_TEMPERATURE, DEFAULT_MAX_TOKENS)
+        )
         t = temperature_overrides.get(role.agent_id, spec_temp)
         m = max_tokens_overrides.get(role.agent_id, spec_max)
         specialists[role.agent_id] = NamedSpecialist(
@@ -375,7 +526,10 @@ def run_named_specialists(
 
     Failure of any single specialist falls back to a zero-signal,
     low-confidence ``AgentOutput`` so the deterministic pipeline is
-    never starved.
+    never starved. In orchestrator-bound mode the inner failure is
+    the *entire orchestrator* failing (active + reserve); a single
+    active failure is handled by the orchestrator's failover chain
+    and produces a normal ``AgentOutput``.
     """
     out: Dict[str, AgentOutput] = {}
     for agent_id, sp in specialists.items():
