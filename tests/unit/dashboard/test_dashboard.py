@@ -240,6 +240,32 @@ class TestDataLoaderPanels(unittest.TestCase):
             self.assertEqual(r["alpha"], 1.0)
             self.assertEqual(r["beta"], 1.0)
             self.assertEqual(r["weight"], 0.5)
+            self.assertEqual(r["source"], "uniform_prior")
+
+    def test_get_reputation_snapshot_reads_persisted_tracker(self):
+        import tempfile
+        from pathlib import Path
+        from investment_agent.agents.agent_reputation import AgentReputationTracker
+        from investment_agent.agents.reputation_persistence import save_reputation
+        # Use the agent IDs the history actually carries.
+        agent_ids = ["agent_economic", "agent_financial", "agent_fundamental",
+                     "agent_market", "agent_sector", "agent_portfolio", "agent_fiscal"]
+        with tempfile.TemporaryDirectory() as d:
+            path = str(Path(d) / "reputation.json")
+            tracker = AgentReputationTracker(agent_ids=agent_ids, regimes=["R01"])
+            for _ in range(3):
+                tracker.record_outcome("agent_economic", "R01", True)
+            tracker.record_outcome("agent_economic", "R01", False)
+            save_reputation(tracker, path)
+            rows = data_loader.get_reputation_snapshot(
+                self.history, regime="R01", reputation_path=path,
+            )
+        a_econ = next(r for r in rows if r["agent_id"] == "agent_economic")
+        self.assertEqual(a_econ["source"], "persisted_tracker")
+        self.assertEqual(a_econ["alpha"], 4.0)
+        self.assertEqual(a_econ["beta"], 2.0)
+        self.assertEqual(a_econ["regime"], "R01")
+        self.assertGreater(a_econ["weight"], 0.5)
 
     def test_get_decision_waterfall_nine_steps(self):
         ev = _sample_audit_event()

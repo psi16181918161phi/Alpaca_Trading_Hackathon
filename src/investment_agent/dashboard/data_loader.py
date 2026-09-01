@@ -706,24 +706,83 @@ def get_trade_outcome_learning(history: Optional[List[Dict[str, Any]]] = None,
     return rows
 
 
-def get_reputation_snapshot(history: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
-    """Per-agent reputation (alpha, beta, weight) defaults.
+def get_reputation_snapshot(
+    history: Optional[List[Dict[str, Any]]] = None,
+    regime: Optional[str] = None,
+    reputation_path: str = "reputation_state.json",
+) -> List[Dict[str, Any]]:
+    """Per-agent reputation (alpha, beta, weight).
 
-    Returns one row per known agent in trade history. The orchestrator
-    owns the in-process ``AgentReputationTracker``; the dashboard never
-    imports it directly (it lives behind a read-only surface). We
-    surface uniform Beta(1,1) priors with ``closed_trades`` so a judge
-    sees the reputation table layout. Once the reputation tracker is
-    persisted to disk (future work), this is the function to swap.
+    Reads from the persisted ``AgentReputationTracker`` if
+    ``reputation_state.json`` is on disk (the orchestrator's
+    ``reputation_persistence`` writes it there after every reputation
+    update). Falls back to uniform Beta(1,1) priors when no tracker
+    state is available yet (e.g. fresh deployment).
+
+    The ``regime`` argument is the regime under which the ensemble
+    actually weighted these agents. If omitted, the snapshot uses
+    the most recent ``regime`` seen in trade history so a closed
+    position's outcome is scored against the regime it traded in.
     """
     if history is None:
         history = load_trade_history()
+
+    tracker = None
+    try:
+        from investment_agent.agents.reputation_persistence import load_reputation
+        tracker = load_reputation(reputation_path)
+    except Exception:
+        tracker = None
+
     agents = sorted({aid for row in history for aid in (row.get("agent_signals") or {}).keys()})
     if not agents:
         return []
+
+    if regime is None:
+        for row in reversed(history):
+            r = row.get("regime")
+            if r:
+                regime = r
+                break
+    if regime is None:
+        regime = "R00"  # canonical unknown regime
+
     closed_count = sum(1 for row in history if row.get("lifecycle_status") == "CLOSED")
+
+    if tracker is not None:
+        rows = []
+        for aid in agents:
+            try:
+                params = tracker.get_posterior_parameters(aid, regime)
+                alpha = float(params.get("alpha", 1.0))
+                beta = float(params.get("beta", 1.0))
+                weight = float(tracker.get_reputation_weight(aid, regime))
+                obs = int(tracker.get_observation_count(aid, regime))
+            except Exception:
+                alpha, beta, weight, obs = 1.0, 1.0, 0.5, 0
+            rows.append({
+                "agent_id": aid,
+                "alpha": alpha,
+                "beta": beta,
+                "weight": weight,
+                "closed_trades": closed_count,
+                "regime": regime,
+                "source": "persisted_tracker",
+            })
+        return rows
+
+    # No tracker on disk yet -- uniform Beta(1,1) priors so the panel
+    # still renders.
     return [
-        {"agent_id": aid, "alpha": 1.0, "beta": 1.0, "weight": 0.5, "closed_trades": closed_count}
+        {
+            "agent_id": aid,
+            "alpha": 1.0,
+            "beta": 1.0,
+            "weight": 0.5,
+            "closed_trades": closed_count,
+            "regime": regime,
+            "source": "uniform_prior",
+        }
         for aid in agents
     ]
 
