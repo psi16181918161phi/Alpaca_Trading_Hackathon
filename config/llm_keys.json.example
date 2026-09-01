@@ -1,0 +1,34 @@
+{
+  "_comment": "Featherless API keys for the three active LLMs plus a reserve. These keys are read by investment_agent.llm.config. They must NEVER be committed.",
+  "providers": {
+    "deephermes": {
+      "api_key_env": "FEATHERLESS_DEEPHERMES_KEY",
+      "model": "NousResearch/DeepHermes-3-Llama-3-8B-Preview",
+      "temperature": 0.20,
+      "max_tokens": 900,
+      "role": "reasoning"
+    },
+    "finance_llama": {
+      "api_key_env": "FEATHERLESS_FINANCE_LLAMA_KEY",
+      "model": "instruction-pretrain/finance-Llama3-8B",
+      "temperature": 0.12,
+      "max_tokens": 700,
+      "role": "fundamental"
+    },
+    "qwen_trading": {
+      "api_key_env": "FEATHERLESS_QWEN_TRADING_KEY",
+      "model": "precisionalgorithms/qwen3.5-9b_precision_agentic_trading",
+      "temperature": 0.15,
+      "max_tokens": 800,
+      "role": "execution"
+    },
+    "reserve": {
+      "api_key_env": "FEATHERLESS_RESERVE_KEY",
+      "model": "NousResearch/DeepHermes-3-Llama-3-8B-Preview",
+      "temperature": 0.15,
+      "max_tokens": 700,
+      "role": "failover",
+      "enabled": false
+    }
+  }
+}

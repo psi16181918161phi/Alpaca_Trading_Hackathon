@@ -248,6 +248,8 @@ memory_log.json
 trade_memory.json
 test_memory_*.json
 audit_log.jsonl
+llm_usage.jsonl
+llm_keys.json
 
 # Keep VS Code MCP config (credentials are NOT stored in it — they use input prompts)
 !.vscode/
