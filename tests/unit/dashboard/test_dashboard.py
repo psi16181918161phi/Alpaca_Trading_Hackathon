@@ -9,7 +9,7 @@ from typing import List
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", "src"))
 
-from investment_agent.dashboard import charts, data_loader
+from investment_agent.dashboard import charts, data_loader, layout
 
 
 def _write_trade_memory(tmpdir, rows: List[dict]) -> str:
@@ -291,6 +291,110 @@ class TestDataLoaderPanels(unittest.TestCase):
         snap = data_loader.get_options_snapshot_safe()
         self.assertIn("ok", snap)
         self.assertIn("contracts", snap)
+
+    def test_get_alpaca_account_snapshot_prefers_live_state_cache(self, tmp_workdir=None):
+        import json
+        import os
+        import tempfile
+        from unittest.mock import patch
+
+        tmpdir = tempfile.mkdtemp(prefix="xqx_dash_live_state_")
+        try:
+            cached = {
+                "ok": True,
+                "equity": 100500.0,
+                "cash": 87900.0,
+                "buying_power": 351619.88,
+                "last_equity": 100000.0,
+                "portfolio_value": 100500.0,
+                "daily_pnl": 500.0,
+                "daily_pnl_pct": 0.005,
+                "total_pnl": 500.0,
+                "total_pnl_pct": 0.005,
+                "baseline_equity": 100000.0,
+                "snapshot_at": "2026-09-01T15:00:00+00:00",
+            }
+            state_path = os.path.join(tmpdir, "live_state.json")
+            with open(state_path, "w") as f:
+                json.dump({"alpaca_account": cached}, f)
+
+            with patch.object(data_loader, "LIVE_STATE_PATH", state_path):
+                snap = data_loader.get_alpaca_account_snapshot()
+            self.assertTrue(snap["ok"])
+            self.assertEqual(snap["equity"], 100500.0)
+            # The cached snapshot is returned as-is; the loader does
+            # NOT make a fresh broker call when a valid cache exists.
+            self.assertEqual(snap["total_pnl"], 500.0)
+        finally:
+            os.unlink(state_path)
+            os.rmdir(tmpdir)
+
+    def test_get_alpaca_account_snapshot_falls_back_to_live_call(self):
+        from unittest.mock import patch
+
+        fake_snap = {
+            "ok": True,
+            "equity": 100123.45,
+            "cash": 87900.0,
+            "buying_power": 351619.88,
+            "last_equity": 100000.0,
+            "portfolio_value": 100123.45,
+            "daily_pnl": 123.45,
+            "daily_pnl_pct": 0.0012345,
+            "total_pnl": 123.45,
+            "total_pnl_pct": 0.0012345,
+            "baseline_equity": 100000.0,
+            "snapshot_at": "2026-09-01T15:00:00+00:00",
+        }
+        with patch.object(data_loader, "_load_live_state_snapshot", return_value={}), \
+             patch("investment_agent.execution.execution.get_account_snapshot",
+                   return_value=fake_snap):
+            snap = data_loader.get_alpaca_account_snapshot()
+        self.assertTrue(snap["ok"])
+        self.assertEqual(snap["equity"], 100123.45)
+        self.assertEqual(snap["daily_pnl"], 123.45)
+
+    def test_get_alpaca_account_snapshot_handles_broker_error(self):
+        from unittest.mock import patch
+
+        with patch.object(data_loader, "_load_live_state_snapshot", return_value={}), \
+             patch("investment_agent.execution.execution.get_account_snapshot",
+                   side_effect=RuntimeError("network down")):
+            snap = data_loader.get_alpaca_account_snapshot()
+        self.assertFalse(snap["ok"])
+        self.assertIn("network down", snap["error"])
+        self.assertIn("snapshot_at", snap)
+
+    def test_get_alpaca_account_snapshot_ignores_stale_cache_without_ok_flag(self):
+        import json
+        import os
+        import tempfile
+        from unittest.mock import patch
+
+        tmpdir = tempfile.mkdtemp(prefix="xqx_dash_stale_live_state_")
+        try:
+            state_path = os.path.join(tmpdir, "live_state.json")
+            # No "ok": True -- the cache should be considered invalid
+            # and the loader should fall through to a live call.
+            with open(state_path, "w") as f:
+                json.dump({"alpaca_account": {"ok": False, "error": "old"}}, f)
+            live_snap = {
+                "ok": True,
+                "equity": 99999.0,
+                "buying_power": 300000.0,
+                "last_equity": 99000.0,
+                "daily_pnl": 999.0,
+                "snapshot_at": "2026-09-01T15:00:00+00:00",
+            }
+            with patch.object(data_loader, "LIVE_STATE_PATH", state_path), \
+                 patch("investment_agent.execution.execution.get_account_snapshot",
+                       return_value=live_snap):
+                snap = data_loader.get_alpaca_account_snapshot()
+            self.assertTrue(snap["ok"])
+            self.assertEqual(snap["equity"], 99999.0)
+        finally:
+            os.unlink(state_path)
+            os.rmdir(tmpdir)
 
 
 class TestChartBuilders(unittest.TestCase):
@@ -769,6 +873,253 @@ class TestChartBuildersAuthoritative(unittest.TestCase):
         joined = " ".join(annotations)
         self.assertIn("-20%", joined)
         self.assertIn("-12%", joined)
+
+
+class TestAlpacaAccountTopPanel(unittest.TestCase):
+    """Tests for the new "X QUANT X — ALPACA ACCOUNT" top panel."""
+
+    def _flatten_text(self, component) -> str:
+        """Walk a Dash component tree and concatenate every text node."""
+        from dash import html
+        if isinstance(component, str):
+            return component
+        if isinstance(component, dict):
+            return " ".join(str(v) for v in component.values())
+        if hasattr(component, "children"):
+            kids = component.children
+            if isinstance(kids, (list, tuple)):
+                return " ".join(self._flatten_text(k) for k in kids)
+            return self._flatten_text(kids)
+        return ""
+
+    def test_panel_renders_full_snapshot_fields(self):
+        snap = {
+            "ok": True,
+            "equity": 100500.00,
+            "cash": 87904.97,
+            "buying_power": 351619.88,
+            "last_equity": 100000.00,
+            "portfolio_value": 100500.00,
+            "daily_pnl": 500.00,
+            "daily_pnl_pct": 0.005,
+            "total_pnl": 500.00,
+            "total_pnl_pct": 0.005,
+            "baseline_equity": 100000.00,
+            "snapshot_at": "2026-09-01T15:00:00+00:00",
+        }
+        panel = layout.alpaca_account_top_panel(snap)
+        text = self._flatten_text(panel)
+        # All five headline KPIs are present.
+        for label in ("EQUITY", "DAILY P&L", "TOTAL P&L", "CASH", "BUYING POWER"):
+            self.assertIn(label, text, f"missing label {label}")
+        # And the numbers from the snapshot appear (formatted with
+        # thousands separators and two decimals).
+        self.assertIn("$100,500.00", text)
+        self.assertIn("$87,904.97", text)
+        self.assertIn("$351,619.88", text)
+        # P&L is signed.
+        self.assertIn("+$500.00", text)
+
+    def test_panel_renders_unavailable_state(self):
+        snap = {"ok": False, "error": "alpaca api down"}
+        panel = layout.alpaca_account_top_panel(snap)
+        text = self._flatten_text(panel)
+        self.assertIn("X QUANT X", text)
+        self.assertIn("unavailable", text)
+        self.assertIn("alpaca api down", text)
+
+    def test_panel_handles_missing_optional_fields(self):
+        snap = {"ok": True, "equity": 100000.0, "buying_power": 200000.0}
+        panel = layout.alpaca_account_top_panel(snap)
+        text = self._flatten_text(panel)
+        self.assertIn("$100,000.00", text)
+        # Missing cash/PNL render as "n/a" instead of crashing.
+        self.assertIn("n/a", text)
+
+    def test_build_control_room_accepts_alpaca_snapshot(self):
+        """Smoke test: build_control_room no longer crashes when the
+        new ``alpaca_snapshot`` kwarg is provided."""
+        from investment_agent.dashboard import layout
+        snap = {
+            "ok": True,
+            "equity": 100000.0,
+            "cash": 50000.0,
+            "buying_power": 200000.0,
+            "last_equity": 100000.0,
+            "portfolio_value": 100000.0,
+            "daily_pnl": 0.0,
+            "total_pnl": 0.0,
+            "snapshot_at": "2026-09-01T15:00:00+00:00",
+        }
+        session = {"state": "STOPPED", "stage": "paper", "cycle_index": 0}
+        kwargs = dict(
+            account={"ok": True, "buying_power": 200000.0, "equity": 100000.0, "cash": 50000.0},
+            alpaca_snapshot=snap,
+            session_status=session,
+            equity_curve=[],
+            cycle={},
+            charges=[],
+            agents=[],
+            kalman={},
+            regime_card={},
+            circuit={"level": "NORMAL", "label": "LEVEL 0", "verdict": "ALLOW"},
+            gates=[],
+            llm_rows=[],
+            trade_outcome_rows=[],
+            reputation_rows=[],
+            waterfall=[],
+            options_rows=[],
+            positions_payload={"ok": True, "positions": []},
+            exposure_pct=0.0,
+            audit_event=None,
+            equity_fig=charts.build_equity_curve_chart([], source="strategy"),
+            soc_fig=charts.build_seven_state_soc_chart([]),
+            agents_fig=charts.build_seven_agents_table([]),
+            kalman_fig=charts.build_kalman_chart({}),
+            regime_fig=charts.build_regime_panel_chart({},),
+            llm_fig=charts.build_llm_providers_table([]),
+            options_fig=charts.build_options_table([]),
+            outcome_fig=charts.build_trade_outcome_table([]),
+            reputation_fig=charts.build_reputation_table([]),
+            waterfall_fig=charts.build_decision_waterfall([]),
+        )
+        room = layout.build_control_room(**kwargs)
+        text = self._flatten_text(room)
+        # The new top panel's title appears in the assembled layout.
+        self.assertIn("X QUANT X — ALPACA ACCOUNT", text)
+        self.assertIn("X QUANT X — SESSION CONTROL", text)
+        # And the old "ALPACA PAPER ACCOUNT" section is gone (the new
+        # top panel is the single source of truth for the account).
+        self.assertNotIn("ALPACA PAPER ACCOUNT", text)
+
+
+class TestSessionControlPanel(unittest.TestCase):
+    """Tests for the new 'X QUANT X — SESSION CONTROL' top panel."""
+
+    def _flatten_text(self, component) -> str:
+        from dash import html
+        if isinstance(component, str):
+            return component
+        if isinstance(component, dict):
+            return " ".join(str(v) for v in component.values())
+        if hasattr(component, "children"):
+            kids = component.children
+            if isinstance(kids, (list, tuple)):
+                return " ".join(self._flatten_text(k) for k in kids)
+            return self._flatten_text(kids)
+        return ""
+
+    def test_panel_renders_idle_stopped_state(self):
+        from investment_agent.dashboard import layout
+        panel = layout.session_control_panel({})
+        text = self._flatten_text(panel)
+        self.assertIn("X QUANT X — SESSION CONTROL", text)
+        self.assertIn("STOPPED", text)
+        self.assertIn("START PAPER TRADING", text)
+        self.assertIn("STOP", text)
+        self.assertIn("EMERGENCY STOP", text)
+
+    def test_panel_renders_running_state_with_kpis(self):
+        from investment_agent.dashboard import layout
+        status = {
+            "state": "RUNNING",
+            "stage": "paper",
+            "cycle_index": 7,
+            "last_decision_summary": "BUY AAPL (equity)",
+            "last_cycle_at": "2026-09-01T16:34:38.207724+00:00",
+            "next_cycle_at": "2026-09-01T16:39:38.207724+00:00",
+            "started_at": "2026-09-01T16:00:00+00:00",
+            "decision_interval_seconds": 300,
+            "symbol_universe": ["AAPL", "SPY"],
+            "total_decisions": 12,
+            "total_orders": 3,
+            "total_closed": 1,
+            "pid": 12345,
+        }
+        panel = layout.session_control_panel(status)
+        text = self._flatten_text(panel)
+        self.assertIn("RUNNING", text)
+        self.assertIn("PAPER", text)
+        self.assertIn("#7", text)
+        self.assertIn("BUY AAPL", text)
+        self.assertIn("12", text)  # total_decisions
+        self.assertIn("300s", text)
+        self.assertIn("PID: 12345", text)
+
+    def test_panel_renders_error_state(self):
+        from investment_agent.dashboard import layout
+        status = {
+            "state": "ERROR",
+            "last_error": "Alpaca account unreachable: 401",
+        }
+        panel = layout.session_control_panel(status)
+        text = self._flatten_text(panel)
+        self.assertIn("ERROR", text)
+        self.assertIn("Alpaca account unreachable", text)
+
+    def test_panel_renders_emergency_halt_state(self):
+        from investment_agent.dashboard import layout
+        status = {"state": "EMERGENCY_HALT"}
+        panel = layout.session_control_panel(status)
+        text = self._flatten_text(panel)
+        self.assertIn("EMERGENCY_HALT", text)
+
+
+class TestSessionStatusLoader(unittest.TestCase):
+    """Tests for the dashboard's session-status file reader / command writer."""
+
+    def test_get_session_status_returns_empty_when_missing(self, tmpdir=None):
+        import os
+        from investment_agent.dashboard import data_loader
+        path = os.path.join(os.environ.get("TEMP", "/tmp"),
+                            "xqx_no_such_session_status_xx.json")
+        if os.path.exists(path):
+            os.unlink(path)
+        self.assertEqual(data_loader.get_session_status(path), {})
+
+    def test_get_session_status_reads_existing(self):
+        import json
+        import os
+        import tempfile
+        from investment_agent.dashboard import data_loader
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "s.json")
+            with open(path, "w") as f:
+                json.dump({"state": "RUNNING", "cycle_index": 3}, f)
+            self.assertEqual(
+                data_loader.get_session_status(path),
+                {"state": "RUNNING", "cycle_index": 3},
+            )
+
+    def test_get_session_status_handles_corrupt_file(self):
+        import os
+        import tempfile
+        from investment_agent.dashboard import data_loader
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "s.json")
+            with open(path, "w") as f:
+                f.write("not json")
+            self.assertEqual(data_loader.get_session_status(path), {})
+
+    def test_write_session_command_writes_file(self):
+        import json
+        import os
+        import tempfile
+        from investment_agent.dashboard import data_loader
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "c.json")
+            ok = data_loader.write_session_command("start", params={"a": 1},
+                                                  command_path=path)
+            self.assertTrue(ok)
+            with open(path) as f:
+                cmd = json.load(f)
+            self.assertEqual(cmd["action"], "start")
+            self.assertEqual(cmd["params"], {"a": 1})
+            self.assertIn("requested_at", cmd)
+
+    def test_write_session_command_rejects_invalid_action(self):
+        from investment_agent.dashboard import data_loader
+        self.assertFalse(data_loader.write_session_command("nuke"))
 
 
 if __name__ == "__main__":

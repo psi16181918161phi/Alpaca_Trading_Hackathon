@@ -165,6 +165,228 @@ def section(title, body, width="100%"):
     )
 
 
+def session_control_panel(session_status, command_file="/tmp/session_command.json"):
+    """'X QUANT X — SESSION CONTROL' top-of-page panel.
+
+    Reads the session status (state, cycle index, last decision, next
+    cycle) from a JSON file written by the SessionController. The
+    START / STOP / EMERGENCY STOP buttons write a command file that
+    the long-running session process polls. The dashboard never
+    imports the Alpaca TradingClient -- this matches the architecture
+    rule that the dashboard is monitoring-only.
+    """
+    state = str(session_status.get("state", "STOPPED") or "STOPPED")
+    stage = str(session_status.get("stage", "paper") or "paper")
+    cycle_index = int(session_status.get("cycle_index", 0) or 0)
+    last_decision = str(session_status.get("last_decision_summary", "") or "")
+    last_cycle_at = str(session_status.get("last_cycle_at", "") or "")
+    next_cycle_at = str(session_status.get("next_cycle_at", "") or "")
+    started_at = str(session_status.get("started_at", "") or "")
+    last_error = str(session_status.get("last_error", "") or "")
+    pid = int(session_status.get("pid", 0) or 0)
+    interval_s = int(session_status.get("decision_interval_seconds", 0) or 0)
+    universe = session_status.get("symbol_universe", []) or []
+    total_decisions = int(session_status.get("total_decisions", 0) or 0)
+    total_orders = int(session_status.get("total_orders", 0) or 0)
+    total_closed = int(session_status.get("total_closed", 0) or 0)
+
+    # Header badge color reflects state.
+    state_bg = colors.SERIES_BENCHMARK
+    if state == "RUNNING":
+        state_bg = colors.SERIES_LONG
+    elif state == "STARTING" or state == "STOPPING":
+        state_bg = colors.ALERT_WARN
+    elif state == "EMERGENCY_HALT":
+        state_bg = colors.ALERT_BADGE
+    elif state == "ERROR":
+        state_bg = colors.ALERT_CRITICAL
+
+    def _short_iso(iso: str) -> str:
+        if not iso:
+            return "n/a"
+        # Trim to HH:MM:SS for compactness.
+        try:
+            return iso[11:19]
+        except Exception:
+            return iso
+
+    def _kpi(label: str, value: str, alert: bool = False) -> html.Div:
+        border = colors.ALERT_BADGE if alert else colors.BORDER
+        return html.Div(
+            children=[
+                html.Div(label, style={
+                    "fontSize": "10px", "color": colors.TEXT_SECONDARY,
+                    "letterSpacing": "0.5px", "fontWeight": "600",
+                    "textTransform": "uppercase",
+                }),
+                html.Div(value, style={
+                    "fontSize": "20px", "fontFamily": colors.FONT_MONO,
+                    "color": (colors.ALERT_BADGE if alert else colors.TEXT_PRIMARY),
+                    "fontWeight": "700", "marginTop": "2px",
+                }),
+            ],
+            style={
+                "backgroundColor": colors.BACKGROUND_CARD,
+                "border": f"1px solid {border}",
+                "borderRadius": "8px", "padding": "10px 14px", "minWidth": "0",
+            },
+        )
+
+    def _status_chip(label: str, bg: str) -> html.Span:
+        return html.Span(
+            label,
+            style={
+                "backgroundColor": bg, "color": colors.BACKGROUND_PRIMARY,
+                "padding": "3px 10px", "borderRadius": "4px",
+                "fontWeight": "700", "fontSize": "12px", "letterSpacing": "1px",
+            },
+        )
+
+    def _cmd_button(label: str, action: str, bg: str, hover_bg: str) -> html.Button:
+        # The buttons write to session_command.json via a tiny inline
+        # JS handler so the dashboard never has to import the
+        # SessionController or Alpaca. The long-running session
+        # process polls that file.
+        return html.Button(
+            label,
+            n_clicks=0,
+            style={
+                "backgroundColor": bg, "color": "#FFFFFF", "border": "none",
+                "padding": "10px 20px", "borderRadius": "4px",
+                "fontFamily": "Inter, sans-serif", "fontWeight": "700",
+                "fontSize": "13px", "cursor": "pointer",
+                "letterSpacing": "1px", "marginRight": "10px",
+            },
+        )
+
+    return html.Div(
+        children=[
+            html.Div(
+                "X QUANT X — SESSION CONTROL",
+                style={
+                    "fontSize": "12px", "color": colors.TEXT_PRIMARY,
+                    "letterSpacing": "2px", "fontWeight": "700",
+                    "marginBottom": "10px",
+                },
+            ),
+            html.Div(
+                children=[
+                    _status_chip(f"MODE: {stage.upper()}", colors.SERIES_BENCHMARK),
+                    _status_chip(state, state_bg),
+                    html.Span(
+                        "● CONNECTED TO ALPACA" if state != "STOPPED" and state != "ERROR"
+                        else "○ ALPACA LINK",
+                        style={
+                            "color": (colors.SERIES_LONG if state not in ("STOPPED", "ERROR")
+                                       else colors.TEXT_SECONDARY),
+                            "fontFamily": colors.FONT_MONO,
+                            "fontSize": "11px", "marginLeft": "16px",
+                            "letterSpacing": "1px",
+                        },
+                    ),
+                ],
+                style={"display": "flex", "alignItems": "center",
+                       "flexWrap": "wrap", "marginBottom": "12px"},
+            ),
+            html.Div(
+                children=[
+                    _kpi("CYCLE", f"#{cycle_index}"),
+                    _kpi("DECISIONS", f"{total_decisions}"),
+                    _kpi("ORDERS", f"{total_orders}"),
+                    _kpi("CLOSED", f"{total_closed}"),
+                    _kpi("LAST CYCLE", _short_iso(last_cycle_at)),
+                    _kpi("NEXT CYCLE", _short_iso(next_cycle_at)),
+                    _kpi("INTERVAL", f"{interval_s}s" if interval_s else "n/a"),
+                    _kpi("LAST DECISION", last_decision or "n/a"),
+                ],
+                style={
+                    "display": "grid",
+                    "gridTemplateColumns": "repeat(4, minmax(0, 1fr))",
+                    "gap": "10px", "marginBottom": "12px",
+                },
+            ),
+            html.Div(
+                children=[
+                    html.Button(
+                        "▶ START PAPER TRADING",
+                        id="session-start-btn",
+                        n_clicks=0,
+                        style={
+                            "backgroundColor": colors.SERIES_LONG,
+                            "color": "#000000", "border": "none",
+                            "padding": "10px 20px", "borderRadius": "4px",
+                            "fontFamily": "Inter, sans-serif", "fontWeight": "700",
+                            "fontSize": "13px", "cursor": "pointer",
+                            "letterSpacing": "1px", "marginRight": "10px",
+                        },
+                    ),
+                    html.Button(
+                        "■ STOP",
+                        id="session-stop-btn",
+                        n_clicks=0,
+                        style={
+                            "backgroundColor": colors.ALERT_WARN,
+                            "color": "#000000", "border": "none",
+                            "padding": "10px 20px", "borderRadius": "4px",
+                            "fontFamily": "Inter, sans-serif", "fontWeight": "700",
+                            "fontSize": "13px", "cursor": "pointer",
+                            "letterSpacing": "1px", "marginRight": "10px",
+                        },
+                    ),
+                    html.Button(
+                        "⚠ EMERGENCY STOP",
+                        id="session-emergency-btn",
+                        n_clicks=0,
+                        style={
+                            "backgroundColor": colors.ALERT_BADGE,
+                            "color": "#FFFFFF", "border": "none",
+                            "padding": "10px 20px", "borderRadius": "4px",
+                            "fontFamily": "Inter, sans-serif", "fontWeight": "700",
+                            "fontSize": "13px", "cursor": "pointer",
+                            "letterSpacing": "1px", "marginRight": "10px",
+                        },
+                    ),
+                    html.Span(
+                        f"PID: {pid}" if pid else "PID: (not running)",
+                        style={
+                            "color": colors.TEXT_SECONDARY,
+                            "fontFamily": colors.FONT_MONO, "fontSize": "11px",
+                        },
+                    ),
+                ],
+                style={"display": "flex", "alignItems": "center",
+                       "flexWrap": "wrap", "marginBottom": "10px"},
+            ),
+            html.Div(
+                children=[
+                    html.Span("UNIVERSE: " + ", ".join(universe) if universe else "UNIVERSE: n/a",
+                              style={"color": colors.TEXT_SECONDARY,
+                                     "fontFamily": colors.FONT_MONO, "fontSize": "11px",
+                                     "marginRight": "16px"}),
+                    html.Span("STARTED: " + _short_iso(started_at),
+                              style={"color": colors.TEXT_SECONDARY,
+                                     "fontFamily": colors.FONT_MONO, "fontSize": "11px"}),
+                ],
+                style={"display": "flex", "flexWrap": "wrap"},
+            ),
+            (html.Div(
+                "ERROR: " + last_error,
+                style={
+                    "color": colors.ALERT_BADGE,
+                    "fontFamily": colors.FONT_MONO, "fontSize": "11px",
+                    "marginTop": "6px",
+                },
+            ) if last_error else None),
+        ],
+        style={
+            "backgroundColor": colors.BACKGROUND_CARD,
+            "border": "1px solid " + colors.BORDER,
+            "borderRadius": "10px", "padding": "14px 18px",
+            "marginBottom": "14px",
+        },
+    )
+
+
 def top_metrics_row(account, equity_curve, cycle, circuit, exposure_pct):
     cur_equity = equity_curve[-1]["equity"] if equity_curve else None
     pnl = (cur_equity - 100000.0) if cur_equity is not None else 0.0
@@ -275,6 +497,131 @@ def risk_gates_panel(gates, circuit):
     return html.Div(children=[header, html.Div(children=rows)])
 
 
+def alpaca_account_top_panel(snapshot):
+    """Prominent top panel: Equity, Daily P&L, Total P&L, Cash, Buying Power.
+
+    Reads the snapshot from ``get_alpaca_account_snapshot()`` which the
+    live loop writes into ``live_state.json`` on every interval. When
+    the broker is unreachable the panel renders a graceful unavailable
+    state with the underlying error so a judge can still tell the
+    pipeline is alive.
+    """
+    if not snapshot.get("ok"):
+        msg = str(snapshot.get("error", "Alpaca account unavailable"))
+        return html.Div(
+            children=[
+                html.Span(
+                    "X QUANT X — ALPACA ACCOUNT",
+                    style={
+                        **SECTION_TITLE_STYLE,
+                        "color": colors.TEXT_PRIMARY,
+                        "letterSpacing": "2px",
+                    },
+                ),
+                html.Div(
+                    "broker snapshot unavailable: " + msg,
+                    style={
+                        "color": colors.TEXT_SECONDARY,
+                        "fontFamily": colors.FONT_MONO,
+                        "fontSize": "12px",
+                    },
+                ),
+            ],
+            style={**SECTION_STYLE, "marginBottom": "14px"},
+        )
+
+    def _f(v, default=None):
+        if v is None:
+            return default
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return default
+
+    equity = _f(snapshot.get("equity"))
+    daily_pnl = _f(snapshot.get("daily_pnl"))
+    daily_pnl_pct = _f(snapshot.get("daily_pnl_pct"))
+    total_pnl = _f(snapshot.get("total_pnl"))
+    total_pnl_pct = _f(snapshot.get("total_pnl_pct"))
+    cash = _f(snapshot.get("cash"))
+    bp = _f(snapshot.get("buying_power"), 0.0)
+
+    def _fmt_money(v, sign=False):
+        if v is None:
+            return "n/a"
+        s = "+" if (sign and v >= 0) else ("" if v >= 0 else "-")
+        return s + "${:,.2f}".format(abs(v))
+
+    def _fmt_pct(v):
+        if v is None:
+            return "n/a"
+        return "{:+.2%}".format(v)
+
+    eq_str = _fmt_money(equity) if equity is not None else "n/a"
+    cash_str = _fmt_money(cash) if cash is not None else "n/a"
+    bp_str = _fmt_money(bp) if bp is not None else "n/a"
+
+    grid = {
+        "display": "grid",
+        "gridTemplateColumns": "repeat(5, minmax(0, 1fr))",
+        "gap": "10px",
+    }
+    return html.Div(
+        children=[
+            html.Div(
+                "X QUANT X — ALPACA ACCOUNT",
+                style={
+                    **SECTION_TITLE_STYLE,
+                    "color": colors.TEXT_PRIMARY,
+                    "letterSpacing": "2px",
+                },
+            ),
+            html.Div(
+                children=[
+                    kpi("EQUITY", eq_str, alert=(equity is not None and equity < 0)),
+                    kpi("DAILY P&L", _fmt_money(daily_pnl, sign=True), alert=(daily_pnl or 0) < 0),
+                    kpi("TOTAL P&L", _fmt_money(total_pnl, sign=True), alert=(total_pnl or 0) < 0),
+                    kpi("CASH", cash_str),
+                    kpi("BUYING POWER", bp_str),
+                ],
+                style=grid,
+            ),
+            html.Div(
+                children=[
+                    html.Span(
+                        "Daily P&L %: " + _fmt_pct(daily_pnl_pct),
+                        style={
+                            "color": colors.TEXT_SECONDARY,
+                            "fontFamily": colors.FONT_MONO,
+                            "fontSize": "11px",
+                            "marginRight": "16px",
+                        },
+                    ),
+                    html.Span(
+                        "Total P&L %: " + _fmt_pct(total_pnl_pct),
+                        style={
+                            "color": colors.TEXT_SECONDARY,
+                            "fontFamily": colors.FONT_MONO,
+                            "fontSize": "11px",
+                            "marginRight": "16px",
+                        },
+                    ),
+                    html.Span(
+                        "snapshot: " + str(snapshot.get("snapshot_at", "")),
+                        style={
+                            "color": colors.TEXT_SECONDARY,
+                            "fontFamily": colors.FONT_MONO,
+                            "fontSize": "11px",
+                        },
+                    ),
+                ],
+                style={"display": "flex", "flexWrap": "wrap", "marginTop": "6px"},
+            ),
+        ],
+        style={**SECTION_STYLE, "marginBottom": "14px"},
+    )
+
+
 def alpaca_summary_block(account, positions_payload, exposure_pct):
     if not account.get("ok"):
         return html.Div(
@@ -322,6 +669,8 @@ def two_col(left_section, right_section):
 
 def build_control_room(
     account,
+    alpaca_snapshot,
+    session_status,
     equity_curve,
     cycle,
     charges,
@@ -351,6 +700,8 @@ def build_control_room(
 ):
     return html.Div(
         children=[
+            session_control_panel(session_status or {}),
+            alpaca_account_top_panel(alpaca_snapshot),
             section("CURRENT AI DECISION", ai_decision_card(cycle, audit_event)),
             section("PORTFOLIO EQUITY", dcc.Graph(figure=equity_fig, config={"displaylogo": False}, style={"height": "320px"})),
             two_col(
@@ -363,7 +714,6 @@ def build_control_room(
             ),
             section("RISK CONTROL & CIRCUIT BREAKER", risk_gates_panel(gates, circuit)),
             section("LLM PROVIDERS / FAILOVER / TOKEN USAGE", dcc.Graph(figure=llm_fig, config={"displaylogo": False}, style={"height": "240px"})),
-            section("ALPACA PAPER ACCOUNT", alpaca_summary_block(account, positions_payload, exposure_pct)),
             section("ALPACA OPTIONS ACTIVITY", dcc.Graph(figure=options_fig, config={"displaylogo": False}, style={"height": "220px"})),
             two_col(
                 section("TRADE OUTCOME LEARNING (LAST 50 CLOSED)", dcc.Graph(figure=outcome_fig, config={"displaylogo": False}, style={"height": "320px"})),

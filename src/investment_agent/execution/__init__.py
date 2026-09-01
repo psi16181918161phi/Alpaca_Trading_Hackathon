@@ -53,6 +53,18 @@ _public_api["get_account_summary"] = (
     "investment_agent.execution.execution",
     "get_account_summary",
 )
+_public_api["get_account_snapshot"] = (
+    "investment_agent.execution.execution",
+    "get_account_snapshot",
+)
+_public_api["load_account_baseline"] = (
+    "investment_agent.execution.execution",
+    "load_account_baseline",
+)
+_public_api["save_account_baseline"] = (
+    "investment_agent.execution.execution",
+    "save_account_baseline",
+)
 _public_api["get_option_contract"] = (
     "investment_agent.execution.execution",
     "get_option_contract",

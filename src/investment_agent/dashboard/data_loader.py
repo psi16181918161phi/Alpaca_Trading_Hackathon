@@ -31,6 +31,7 @@ import json
 import math
 import os
 from collections import Counter, defaultdict
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 DEFAULT_TRADE_MEMORY_FILE = "trade_memory.json"
@@ -253,6 +254,8 @@ def summarize_llm_providers(records: Optional[List[Dict[str, Any]]] = None,
     by_pid: Dict[str, Dict[str, Any]] = {}
     for r in records:
         pid = r.get("provider_id") or "unknown"
+        if pid in ("qwen_trading", "agent_qwen_trading"):
+            continue
         row = by_pid.setdefault(pid, {
             "provider_id": pid,
             "model": r.get("model", ""),
@@ -286,6 +289,107 @@ def get_account_summary_safe() -> Dict[str, Any]:
         return {"ok": True, **get_account_summary()}
     except Exception as exc:  # noqa: BLE001 - dashboard must never crash on a bad API call
         return {"ok": False, "error": str(exc)}
+
+
+# Path the live orchestrator writes its cached broker snapshot to.
+LIVE_STATE_PATH = "live_state.json"
+
+
+def _load_live_state_snapshot() -> Dict[str, Any]:
+    """Read the live orchestrator's ``alpaca_account`` block from
+    ``live_state.json`` if present. Returns an empty dict when the
+    file is missing or malformed (dashboard must never crash on a
+    transient read).
+    """
+    if not os.path.exists(LIVE_STATE_PATH):
+        return {}
+    try:
+        with open(LIVE_STATE_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return {}
+        snap = data.get("alpaca_account")
+        return snap if isinstance(snap, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def get_alpaca_account_snapshot(
+    use_cached: bool = True,
+    custom_baseline_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Return the Alpaca account snapshot for the dashboard.
+
+    Order of preference:
+      1. The cached snapshot inside ``live_state.json`` (written by the
+         live loop on every interval) -- so the dashboard never needs
+         a direct broker call.
+      2. A fresh ``get_account_snapshot`` call (Total P&L against the
+         persistent baseline) -- used when the loop isn't running or
+         hasn't snapshotted yet.
+
+    The returned dict is the same shape the live loop writes; the
+    dashboard layout can read it uniformly.
+    """
+    if use_cached:
+        cached = _load_live_state_snapshot()
+        if cached and cached.get("ok"):
+            return cached
+    try:
+        from investment_agent.execution.execution import get_account_snapshot
+        return get_account_snapshot(custom_baseline_path=custom_baseline_path)
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "ok": False,
+            "error": str(exc),
+            "snapshot_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+
+def get_session_status(
+    status_path: str = "session_status.json",
+) -> Dict[str, Any]:
+    """Read the SessionController's persisted status.
+
+    Falls back to an empty dict when no session has ever run, so the
+    dashboard's SESSION CONTROL panel renders an idle STOPPED state
+    instead of crashing.
+    """
+    if not os.path.exists(status_path):
+        return {}
+    try:
+        with open(status_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def write_session_command(
+    action: str,
+    params: Optional[Dict[str, Any]] = None,
+    command_path: str = "session_command.json",
+) -> bool:
+    """Write a start / stop / emergency_stop command for the daemon.
+
+    The long-running session process polls ``command_path`` once a
+    second, applies the command, and deletes the file. The dashboard
+    uses this so it never imports the SessionController or the
+    Alpaca TradingClient.
+    """
+    if action not in {"start", "stop", "emergency_stop"}:
+        return False
+    payload = {
+        "action": action,
+        "params": params or {},
+        "requested_at": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        with open(command_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, sort_keys=True)
+        return True
+    except OSError:
+        return False
 
 
 def get_positions_safe() -> Dict[str, Any]:
@@ -491,10 +595,15 @@ def get_drawdown_thresholds() -> Dict[str, float]:
         return {"flatten": 0.15, "reduce": 0.10}
 
 
+CANONICAL_AGENT_ORDER = [
+    "agent_economic", "agent_financial", "agent_fiscal",
+    "agent_portfolio", "agent_fundamental", "agent_market", "agent_sector"
+]
+
 def get_seven_agents(cycle: Optional[Dict[str, Any]] = None,
                      history: Optional[List[Dict[str, Any]]] = None,
                      reputation_window: int = 30) -> List[Dict[str, Any]]:
-    """Return the seven-agent table for the current cycle from authoritative data.
+    """Return the seven-agent table for the current cycle in canonical order.
 
     Order of preference for each channel:
       1. ``agent_outputs_full`` (persisted at decision time with all eight
@@ -507,9 +616,15 @@ def get_seven_agents(cycle: Optional[Dict[str, Any]] = None,
     full = (cycle or {}).get("agent_outputs_full") or {}
     legacy_signals = (cycle or {}).get("agent_signals", {}) or {}
     rows: List[Dict[str, Any]] = []
+    
+    agent_keys = [a for a in CANONICAL_AGENT_ORDER if a in full or a in legacy_signals]
+    # Add any extra agents not in canonical list
+    extra_keys = sorted(set(list(full.keys()) + list(legacy_signals.keys())) - set(CANONICAL_AGENT_ORDER))
+    agent_keys.extend(extra_keys)
+
     if full:
-        for aid in sorted(full.keys()):
-            row = full[aid] or {}
+        for aid in agent_keys:
+            row = full.get(aid) or {}
             rows.append({
                 "agent_id": aid,
                 "signal": float(row.get("signal", 0.0) or 0.0),
@@ -528,7 +643,8 @@ def get_seven_agents(cycle: Optional[Dict[str, Any]] = None,
             })
     else:
         effective_conf = float((cycle or {}).get("effective_confidence", 0.0) or 0.0)
-        for aid, sig in sorted(legacy_signals.items()):
+        for aid in agent_keys:
+            sig = legacy_signals.get(aid, 0.0)
             try:
                 signal = float(sig)
             except (TypeError, ValueError):

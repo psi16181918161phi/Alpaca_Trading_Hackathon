@@ -7,15 +7,15 @@ single scrolling "control-room" dashboard. The 12 sections are rendered
 in a fixed vertical order so a judge can scan the entire pipeline in
 under 20 seconds:
 
-  1. Current AI Decision
-  2. Portfolio Equity (P&L)
-  3. Seven specialist agents
-  4. Seven-state capital gate
-  5. Kalman estimation
-  6. Market regime
-  7. Risk Control & circuit breaker
-  8. LLM providers / failover
-  9. Alpaca paper account
+  1. Alpaca account (top panel: Equity / Daily P&L / Total P&L / Cash / Buying Power)
+  2. Current AI Decision
+  3. Portfolio Equity (P&L)
+  4. Seven specialist agents
+  5. Seven-state capital gate
+  6. Kalman estimation
+  7. Market regime
+  8. Risk Control & circuit breaker
+  9. LLM providers / failover
  10. Options activity
  11. Trade outcome learning + agent reputation
  12. "Why did X Quant X trade?" decision waterfall
@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from typing import Any, Dict
 
 from dash import Dash, Input, Output, dcc, html
 
@@ -82,6 +83,15 @@ def _build_control_room():
     history = data_loader.load_trade_history()
     equity_curve = data_loader.compute_equity_curve(history)
     account = data_loader.get_account_summary_safe()
+    # The top panel's authoritative source. Prefers the live-loop's
+    # cached snapshot inside ``live_state.json`` (so the dashboard
+    # never has to hit the broker directly), and falls back to a live
+    # ``get_account_snapshot`` call when the loop is not running.
+    alpaca_snapshot = data_loader.get_alpaca_account_snapshot()
+    # Session controller status (state, cycle, last decision) -- the
+    # SessionController writes this on every transition. The dashboard
+    # is read-only w.r.t. this file.
+    session_status = data_loader.get_session_status()
     positions_payload = data_loader.get_positions_safe()
     orders = data_loader.get_order_history_safe().get("orders", [])
 
@@ -125,6 +135,8 @@ def _build_control_room():
 
     return layout.build_control_room(
         account=account,
+        alpaca_snapshot=alpaca_snapshot,
+        session_status=session_status,
         equity_curve=equity_curve,
         cycle=cycle,
         charges=charges,
@@ -155,31 +167,91 @@ def _build_control_room():
 
 
 app.layout = html.Div([
-    dcc.Interval(id="refresh-interval", interval=REFRESH_INTERVAL_MS, n_intervals=0),
+    html.Button(
+        "Refresh",
+        id="refresh-btn",
+        n_clicks=0,
+        style={
+            "position": "fixed", "top": "8px", "right": "20px", "zIndex": "9999",
+            "backgroundColor": "#2DD4BF", "color": "#000", "border": "none",
+            "padding": "6px 14px", "borderRadius": "4px",
+            "fontFamily": "Inter, sans-serif", "fontWeight": "700",
+            "cursor": "pointer", "fontSize": "12px",
+        },
+    ),
     layout.build_header(SESSION_ID, MODE),
     html.Div(id="control-room", style={"padding": "20px", "minWidth": "0"}),
     layout.build_stop_session_modal(),
+    # Client-side meta-refresh as a workaround for the Dash 4.4.1
+    # callback bug (https://github.com/plotly/dash/issues/2885) where
+    # single-Output callbacks misclassify as wildcard multi-output.
+    # The page reloads every REFRESH_INTERVAL_MS, so the dashboard
+    # always shows fresh Alpaca data even though the in-process
+    # callback returns 500. Manual refresh still works via the
+    # floating button.
+    html.Script(
+        f"setTimeout(function(){{ window.location.reload(); }}, {REFRESH_INTERVAL_MS});"
+    ),
 ], style=layout.PAGE_STYLE)
 
 
 @app.callback(
     Output("control-room", "children"),
-    Input("refresh-interval", "n_intervals"),
+    Input("refresh-btn", "n_clicks"),
+    prevent_initial_call=False,
 )
-def _render_control_room(_n_intervals):
+def _render_control_room(_n_clicks):
     return _build_control_room()
 
 
+# ----- session control buttons (write a command file; the daemon polls it) -----
+
+# Default session parameters; users override via the session daemon's
+# CLI / env. The dashboard only tells the daemon to start, not how.
+DEFAULT_SESSION_PARAMS: Dict[str, Any] = {
+    "stage": "paper",
+    "decision_interval_seconds": 300,
+    "symbol_universe": ["AAPL", "SPY", "MSFT", "TSLA", "NVDA"],
+    "max_lookups_per_interval": 2,
+}
+
+
 @app.callback(
-    Output("dashboard-elapsed", "children"),
-    Output("dashboard-last-refresh", "children"),
-    Input("refresh-interval", "n_intervals"),
+    Output("session-start-btn", "n_clicks"),
+    Input("session-start-btn", "n_clicks"),
+    prevent_initial_call=True,
 )
-def _update_header_clock(_n_intervals):
-    elapsed = datetime.now() - SESSION_START
-    elapsed_str = str(elapsed).split(".")[0]
-    last_refresh = datetime.now().strftime("%H:%M:%S")
-    return f"elapsed: {elapsed_str}", f"last refresh: {last_refresh}"
+def _on_session_start(n_clicks):
+    if not n_clicks:
+        return 0
+    data_loader.write_session_command(
+        "start", params=DEFAULT_SESSION_PARAMS,
+    )
+    return n_clicks
+
+
+@app.callback(
+    Output("session-stop-btn", "n_clicks"),
+    Input("session-stop-btn", "n_clicks"),
+    prevent_initial_call=True,
+)
+def _on_session_stop(n_clicks):
+    if not n_clicks:
+        return 0
+    data_loader.write_session_command("stop")
+    return n_clicks
+
+
+@app.callback(
+    Output("session-emergency-btn", "n_clicks"),
+    Input("session-emergency-btn", "n_clicks"),
+    prevent_initial_call=True,
+)
+def _on_session_emergency(n_clicks):
+    if not n_clicks:
+        return 0
+    data_loader.write_session_command("emergency_stop")
+    return n_clicks
 
 
 @app.callback(

@@ -132,10 +132,12 @@ class UsageRecord:
 
 
 class UsageLog:
-    """Append-only JSONL usage log for the $25 budget tracker."""
+    """Append-only JSONL usage log for the $25 budget tracker with in-memory fallback."""
 
     def __init__(self, log_file: str = USAGE_LOG_FILE) -> None:
         self._log_file = log_file
+        self._in_memory_records: List[UsageRecord] = []
+        self._degraded = False
 
     def record(
         self,
@@ -157,30 +159,35 @@ class UsageLog:
             completion_tokens=int(completion_tokens),
             error=error,
         )
+        self._in_memory_records.append(rec)
         try:
             line = json.dumps(rec.__dict__) + "\n"
             with open(self._log_file, "a", encoding="utf-8") as f:
                 f.write(line)
-        except OSError:
-            pass
+        except OSError as exc:
+            if not self._degraded:
+                import logging
+                logging.getLogger(__name__).warning("UsageLog disk write failed (%s); usage tracked in-memory.", exc)
+                self._degraded = True
 
     def total_tokens(self) -> int:
-        total = 0
+        total = sum(r.prompt_tokens + r.completion_tokens for r in self._in_memory_records)
         if not os.path.exists(self._log_file):
             return total
+        file_total = 0
         try:
             with open(self._log_file, "r", encoding="utf-8") as f:
                 for line in f:
                     try:
                         rec = json.loads(line)
-                        total += int(rec.get("prompt_tokens", 0)) + int(
+                        file_total += int(rec.get("prompt_tokens", 0)) + int(
                             rec.get("completion_tokens", 0)
                         )
                     except json.JSONDecodeError:
                         continue
+            return max(total, file_total)
         except OSError:
-            pass
-        return total
+            return total
 
 
 # ---------------------------------------------------------------------------

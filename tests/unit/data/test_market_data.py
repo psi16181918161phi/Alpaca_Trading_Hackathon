@@ -120,6 +120,36 @@ class TestAlpacaClientLazy(unittest.TestCase):
         # Lazy: no real client is built until the first request
         self.assertIsNone(client._client)
 
+    def test_get_historical_bars_passes_iex_feed(self):
+        """The Alpaca client must request the IEX feed for paper accounts.
+
+        Paper-trading plans do not include real-time SIP data; the IEX
+        feed is the only data the broker will return for an unauthorized
+        subscription. Without this, the live loop fails on every bar
+        request with "subscription does not permit querying recent SIP
+        data".
+        """
+        from unittest.mock import MagicMock, patch
+        from alpaca.data.requests import StockBarsRequest
+        client = AlpacaMarketDataClient(api_key="x", api_secret="y")
+        fake_inner = MagicMock()
+        fake_inner.get_stock_bars.return_value = _FakeBarSet([])
+        with patch.object(client, "_ensure_client", return_value=fake_inner):
+            client.get_historical_bars(BarRequest(
+                symbol="AAPL", start=datetime(2024, 1, 2), end=datetime(2024, 1, 5),
+            ))
+            req = fake_inner.get_stock_bars.call_args[0][0]
+            self.assertIsInstance(req, StockBarsRequest)
+            self.assertEqual(req.feed, "iex")
+
+
+class _FakeBarSet:
+    """Minimal stand-in for an alpaca BarSet used in the IEX-feed test."""
+    def __init__(self, rows):
+        self._rows = rows
+    def __getitem__(self, symbol):
+        return iter(self._rows)
+
 
 if __name__ == "__main__":
     unittest.main()

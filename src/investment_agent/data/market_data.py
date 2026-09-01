@@ -114,6 +114,9 @@ class AlpacaMarketDataClient:
             "symbol_or_symbols": request.symbol,
             "timeframe": tf,
             "start": request.start,
+            # Paper-trading plans don't include real-time SIP data;
+            # use the IEX feed (15-min delayed, included with paper).
+            "feed": "iex",
         }
         if request.end is not None:
             kwargs["end"] = request.end

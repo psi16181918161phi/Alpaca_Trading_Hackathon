@@ -41,7 +41,8 @@ class TestPlaceOrder(unittest.TestCase):
     def test_returns_none_when_unsafe(self):
         with patch.object(execution, "is_trade_safe", return_value=False):
             result = execution.place_order("AAPL", "buy", qty=1, price_per_contract=100.0)
-            self.assertIsNone(result)
+            self.assertFalse(result.submitted)
+            self.assertEqual(result.status, "BLOCKED")
 
     def test_submits_order_when_safe(self):
         fake_client = MagicMock()
@@ -50,7 +51,8 @@ class TestPlaceOrder(unittest.TestCase):
         with patch.object(execution, "is_trade_safe", return_value=True):
             with patch.object(execution, "_get_trading_client", return_value=fake_client):
                 result = execution.place_order("AAPL", "buy", qty=2, price_per_contract=1.0)
-                self.assertEqual(result, fake_result)
+                self.assertTrue(result.submitted)
+                self.assertEqual(result.order_id, "order-1")
                 fake_client.submit_order.assert_called_once()
                 sent_order = fake_client.submit_order.call_args[0][0]
                 self.assertEqual(sent_order.qty, 2)
@@ -65,6 +67,10 @@ class TestPlaceOrder(unittest.TestCase):
                 execution.place_order("AAPL", "sell", qty=1, price_per_contract=1.0)
                 sent_order = fake_client.submit_order.call_args[0][0]
                 self.assertEqual(sent_order.side, execution.OrderSide.SELL)
+
+    def test_invalid_side_raises_value_error(self):
+        with self.assertRaises(ValueError):
+            execution.place_order("AAPL", "banana", qty=1, price_per_contract=1.0)
 
 
 class TestGetOptionContract(unittest.TestCase):
