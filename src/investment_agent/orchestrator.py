@@ -396,8 +396,15 @@ class XQuantXOrchestrator:
         kalman_state: KalmanState,
         capital_gate: CapitalGateResult,
         decision: TradingDecision,
+        investment_kalman_gain: float,
     ) -> TradeExperience:
-        """Build a PENDING_FILL TradeExperience BEFORE logging (P1-5, P0-1)."""
+        """Build a PENDING_FILL TradeExperience BEFORE logging (P1-5, P0-1).
+
+        ``investment_kalman_gain`` is the authoritative K_t computed by
+        ``compute_investment_kalman_gain`` in the cycle; the legacy
+        ``kalman_gain`` field is preserved (set to the same value) for
+        back-compat with existing trade_memory consumers.
+        """
         return TradeExperience(
             decision_id=decision.decision_id,
             timestamp=datetime.now(),
@@ -408,7 +415,7 @@ class XQuantXOrchestrator:
             ensemble_signal=float(ensemble.ensemble_signal),
             disagreement=float(ensemble.disagreement),
             effective_confidence=float(ensemble.effective_confidence),
-            kalman_gain=float(kalman_state.price_variance),
+            kalman_gain=float(investment_kalman_gain),
             kalman_price=float(kalman_state.estimated_price),
             kalman_trend=float(kalman_state.trend),
             capital_gate_verdict=capital_gate.verdict.name,
@@ -425,6 +432,12 @@ class XQuantXOrchestrator:
             order_id=None,
             fill_price=None,
             closed_at=None,
+            kalman_prior=float(ensemble.effective_confidence),
+            kalman_observation=float(ensemble.ensemble_signal),
+            investment_kalman_gain=float(investment_kalman_gain),
+            kalman_posterior=float(capital_gate.effective_cap),
+            state_gatings=dict(capital_gate.state_gatings),
+            triggered_rules=tuple(capital_gate.triggered_rules),
         )
 
     def run_cycle(
@@ -503,6 +516,33 @@ class XQuantXOrchestrator:
             historical_context=historical_context,
         )
 
+        # Build the authoritative per-agent payload ONCE; used in both
+        # the audit log and the persisted TradeExperience so the
+        # dashboard's 7-agent table has a single source of truth.
+        agent_outputs_full: Dict[str, Dict[str, float]] = {}
+        for a in agent_outputs:
+            row: Dict[str, float] = {
+                "signal": float(a.s),
+                "confidence": float(a.c),
+                "uncertainty": float(a.u),
+                "doubt": float(a.d),
+                "p_plus": float(a.p_plus),
+                "p_minus": float(a.p_minus),
+                "delta_t": float(a.delta_t),
+                "noise": float(a.r),
+                "weight": float(weights.get(a.agent_id, 0.0)),
+            }
+            try:
+                params = self._reputation_tracker.get_posterior_parameters(
+                    a.agent_id, regime_result.regime
+                )
+                row["reputation_alpha"] = float(params["alpha"])
+                row["reputation_beta"] = float(params["beta"])
+            except Exception:
+                row["reputation_alpha"] = 1.0
+                row["reputation_beta"] = 1.0
+            agent_outputs_full[a.agent_id] = row
+
         self._audit_log.record_decision(
             decision_id=decision.decision_id,
             symbol=self._symbol,
@@ -529,6 +569,13 @@ class XQuantXOrchestrator:
                 "historical_win_rate": historical_context.get("historical_win_rate", 0.0),
                 "historical_avg_pnl": historical_context.get("avg_pnl", 0.0),
                 "memory_adjustment": historical_context.get("confidence_adjustment", 0.0),
+                # Authoritative Kalman / ensemble provenance (P0 dashboard fix).
+                # The dashboard reads these rather than reconstructing the posterior.
+                "kalman_prior": float(ensemble.effective_confidence),
+                "kalman_observation": float(ensemble.ensemble_signal),
+                "investment_kalman_gain": float(kalman_gain),
+                "kalman_posterior": float(capital_gate.effective_cap),
+                "agent_outputs_full": agent_outputs_full,
             },
         )
 
@@ -542,6 +589,9 @@ class XQuantXOrchestrator:
             decision=decision,
             agent_outputs=agent_outputs,
             order_result=order_result,
+            investment_kalman_gain=kalman_gain,
+            agent_weights=weights,
+            agent_outputs_full=agent_outputs_full,
         )
 
         # 10. Reputation update ONLY on terminal lifecycle (P0-1).
@@ -881,8 +931,22 @@ class XQuantXOrchestrator:
         decision: TradingDecision,
         agent_outputs: List[AgentOutput],
         order_result: Optional[Dict[str, Any]],
+        investment_kalman_gain: float,
+        agent_weights: Optional[Dict[str, float]] = None,
+        agent_outputs_full: Optional[Dict[str, Dict[str, float]]] = None,
     ) -> TradeExperience:
         """Record a PENDING_FILL experience after order submission (P0-1).
+
+        Authoritative Kalman/ensemble fields are written here so the
+        dashboard can read them without reconstructing. The legacy
+        ``kalman_gain`` field is set to the same K_t value (was previously
+        set incorrectly to ``kalman_state.price_variance``).
+
+        The full per-agent ``AgentOutput`` (all eight channels) plus
+        per-agent weight and per-agent (alpha, beta) reputation are
+        stored in ``agent_outputs_full`` for the dashboard's 7-agent table.
+        ``agent_outputs_full`` is built once in ``run_cycle`` and passed in
+        to keep the audit log and the persisted experience in lockstep.
 
         Returns
         -------
@@ -914,7 +978,7 @@ class XQuantXOrchestrator:
             ensemble_signal=float(ensemble.ensemble_signal),
             disagreement=float(ensemble.disagreement),
             effective_confidence=float(ensemble.effective_confidence),
-            kalman_gain=float(kalman_state.price_variance),
+            kalman_gain=float(investment_kalman_gain),
             kalman_price=float(kalman_state.estimated_price),
             kalman_trend=float(kalman_state.trend),
             capital_gate_verdict=capital_gate.verdict.name,
@@ -931,6 +995,17 @@ class XQuantXOrchestrator:
             order_id=order_id,
             fill_price=None,
             closed_at=None,
+            kalman_prior=float(ensemble.effective_confidence),
+            kalman_observation=float(ensemble.ensemble_signal),
+            investment_kalman_gain=float(investment_kalman_gain),
+            kalman_posterior=float(capital_gate.effective_cap),
+            state_gatings=dict(capital_gate.state_gatings),
+            triggered_rules=tuple(capital_gate.triggered_rules),
+            agent_outputs_full=(
+                {k: dict(v) for k, v in agent_outputs_full.items()}
+                if agent_outputs_full is not None
+                else None
+            ),
         )
         self._trade_memory.log_experience(experience)
         return experience

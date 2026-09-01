@@ -245,6 +245,23 @@ class TradeExperience:
     order_id: Optional[str] = None
     fill_price: Optional[float] = None
     closed_at: Optional[datetime] = None
+    # Authoritative Kalman/ensemble provenance (added for P0 dashboard fixes).
+    # These are the production-truth values written by the orchestrator at
+    # decision time; the dashboard reads them directly rather than
+    # reconstructing posterior estimates from the legacy fields above.
+    kalman_prior: Optional[float] = None           # effective_confidence at decision time (Bayesian prior belief)
+    kalman_observation: Optional[float] = None    # ensemble_signal at decision time (market observation)
+    investment_kalman_gain: Optional[float] = None  # K_t from compute_investment_kalman_gain (authoritative)
+    kalman_posterior: Optional[float] = None       # state-gated posterior: capital_gate.effective_cap
+    state_gatings: Optional[Dict[str, float]] = None  # g_d per state dimension
+    triggered_rules: Optional[tuple] = None        # rule ids triggered during the gate evaluation
+    # Authoritative per-agent outputs (eight channels each) recorded at
+    # decision time so the dashboard can render the full 7-agent table
+    # without reconstructing from ``agent_signals`` (which only carries
+    # the scalar signal). Keyed by agent_id; values are dicts with the
+    # keys: signal, confidence, uncertainty, doubt, p_plus, p_minus,
+    # delta_t, noise, weight, reputation_alpha, reputation_beta.
+    agent_outputs_full: Optional[Dict[str, Dict[str, float]]] = None
 
 
 @dataclass(frozen=True)
@@ -368,12 +385,25 @@ class TradeMemory:
             "order_id": exp.order_id,
             "fill_price": exp.fill_price,
             "closed_at": exp.closed_at.isoformat() if exp.closed_at else None,
+            "kalman_prior": exp.kalman_prior,
+            "kalman_observation": exp.kalman_observation,
+            "investment_kalman_gain": exp.investment_kalman_gain,
+            "kalman_posterior": exp.kalman_posterior,
+            "state_gatings": dict(exp.state_gatings) if exp.state_gatings else None,
+            "triggered_rules": list(exp.triggered_rules) if exp.triggered_rules else None,
+            "agent_outputs_full": {k: dict(v) for k, v in (exp.agent_outputs_full or {}).items()} or None,
         }
 
     def _deserialize(self, raw: Dict[str, Any]) -> TradeExperience:
         """Convert JSON dict to TradeExperience."""
         closed_at_raw = raw.get("closed_at")
         closed_at = datetime.fromisoformat(closed_at_raw) if closed_at_raw else None
+        triggered_raw = raw.get("triggered_rules")
+        triggered_rules = tuple(triggered_raw) if triggered_raw else None
+        aof_raw = raw.get("agent_outputs_full")
+        agent_outputs_full = (
+            {k: dict(v) for k, v in aof_raw.items()} if isinstance(aof_raw, dict) else None
+        )
         return TradeExperience(
             decision_id=raw.get("decision_id", ""),
             timestamp=datetime.fromisoformat(raw["timestamp"]),
@@ -401,6 +431,13 @@ class TradeMemory:
             order_id=raw.get("order_id"),
             fill_price=raw.get("fill_price"),
             closed_at=closed_at,
+            kalman_prior=raw.get("kalman_prior"),
+            kalman_observation=raw.get("kalman_observation"),
+            investment_kalman_gain=raw.get("investment_kalman_gain"),
+            kalman_posterior=raw.get("kalman_posterior"),
+            state_gatings=raw.get("state_gatings"),
+            triggered_rules=triggered_rules,
+            agent_outputs_full=agent_outputs_full,
         )
 
     def _is_valid_experience(self, raw: Dict[str, Any]) -> bool:

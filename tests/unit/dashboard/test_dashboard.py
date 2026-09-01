@@ -176,10 +176,34 @@ class TestDataLoaderPanels(unittest.TestCase):
             self.assertIn("confidence", a)
 
     def test_get_kalman_card_posterior_equals_blend(self):
+        """When the cycle has authoritative fields, they are returned directly.
+
+        ``posterior_authoritative=True`` proves the dashboard is reading
+        the value the orchestrator wrote, not reconstructing a blend.
+        """
+        self.cycle["kalman_prior"] = 0.81
+        self.cycle["kalman_observation"] = 0.45
+        self.cycle["investment_kalman_gain"] = 0.73
+        self.cycle["kalman_posterior"] = 0.5472  # authoritatively written by orchestrator
         k = data_loader.get_kalman_card(self.cycle)
-        expected = 0.81 * (1.0 - 0.73) + 0.45 * 0.73
-        self.assertAlmostEqual(k["posterior_estimate"], expected, places=6)
+        self.assertAlmostEqual(k["posterior_estimate"], 0.5472, places=4)
+        self.assertTrue(k["posterior_authoritative"])
         self.assertEqual(k["kalman_gain"], 0.73)
+        self.assertEqual(k["prior_confidence"], 0.81)
+        self.assertEqual(k["market_observation"], 0.45)
+
+    def test_get_kalman_card_falls_back_without_authority(self):
+        """Without ``kalman_posterior``, the dashboard reports 0.0 and
+        flags ``posterior_authoritative=False`` instead of fabricating
+        a Bayesian blend.
+        """
+        self.cycle.pop("kalman_posterior", None)
+        self.cycle.pop("kalman_prior", None)
+        self.cycle.pop("kalman_observation", None)
+        self.cycle.pop("investment_kalman_gain", None)
+        k = data_loader.get_kalman_card(self.cycle)
+        self.assertFalse(k["posterior_authoritative"])
+        self.assertEqual(k["posterior_estimate"], 0.0)
 
     def test_get_regime_card_returns_top(self):
         rc = data_loader.get_regime_card(self.cycle)
@@ -339,6 +363,378 @@ class TestChartBuilders(unittest.TestCase):
     def test_decision_waterfall_empty(self):
         fig = charts.build_decision_waterfall([])
         self.assertIsNotNone(fig)
+
+
+# ---------------------------------------------------------------------------
+# P0 dashboard data-integrity additions
+# ---------------------------------------------------------------------------
+
+class TestAuthoritativeKalmanProvenance(unittest.TestCase):
+    def setUp(self):
+        self.cycle = {
+            "regime": "R01",
+            "ensemble_signal": 0.45,
+            "effective_confidence": 0.81,
+            "kalman_gain": 0.73,
+            "kalman_price": 100.0,
+            "kalman_trend": 0.01,
+            "kalman_posterior": 0.5472,
+            "kalman_prior": 0.81,
+            "kalman_observation": 0.45,
+            "investment_kalman_gain": 0.73,
+        }
+
+    def test_uses_authoritative_kalman_posterior(self):
+        k = data_loader.get_kalman_card(self.cycle)
+        self.assertTrue(k["posterior_authoritative"])
+        self.assertEqual(k["posterior_estimate"], 0.5472)
+
+    def test_falls_back_when_no_posterior(self):
+        self.cycle.pop("kalman_posterior", None)
+        k = data_loader.get_kalman_card(self.cycle)
+        self.assertFalse(k["posterior_authoritative"])
+        self.assertEqual(k["posterior_estimate"], 0.0)
+
+
+class TestRealOptionsActivity(unittest.TestCase):
+    def test_is_option_symbol_occ_format(self):
+        self.assertTrue(data_loader._is_option_symbol("AAPL240119C00200000"))
+        self.assertTrue(data_loader._is_option_symbol("SPY260620P00425000"))
+        # 6-char underlying + 6 date + C/P + 8 strike
+        self.assertFalse(data_loader._is_option_symbol("AAPL"))  # too short
+        self.assertFalse(data_loader._is_option_symbol("AAPL240119X00200000"))  # X is invalid
+        self.assertFalse(data_loader._is_option_symbol("BRK.B240119C00200000"))  # dot in underlying
+
+    def test_get_recent_options_activity_filters_order_history(self):
+        from unittest.mock import patch
+        fake_orders = [
+            {"timestamp": "2026-09-01T08:00:00", "order_id": "o1", "symbol": "AAPL240119C00200000",
+             "side": "buy", "type": "market", "qty": 1.0, "filled_qty": 1.0,
+             "filled_avg_price": 5.5, "status": "filled"},
+            {"timestamp": "2026-09-01T08:01:00", "order_id": "o2", "symbol": "AAPL",
+             "side": "buy", "type": "market", "qty": 10.0, "filled_qty": 10.0,
+             "filled_avg_price": 200.0, "status": "filled"},
+            {"timestamp": "2026-09-01T08:02:00", "order_id": "o3", "symbol": "SPY260620P00425000",
+             "side": "sell", "type": "limit", "qty": 2.0, "filled_qty": 0.0,
+             "filled_avg_price": None, "status": "new"},
+        ]
+        with patch.object(data_loader, "get_order_history_safe",
+                          return_value={"ok": True, "orders": fake_orders}):
+            payload = data_loader.get_recent_options_activity(limit=10)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(len(payload["orders"]), 2)
+        syms = {o["symbol"] for o in payload["orders"]}
+        self.assertIn("AAPL240119C00200000", syms)
+        self.assertIn("SPY260620P00425000", syms)
+        # Underlying is the first 1-6 chars of the OCC symbol
+        for o in payload["orders"]:
+            self.assertEqual(o["asset_class"], "option")
+            self.assertIn("underlying", o)
+            self.assertIn(o["underlying"], ("AAPL", "SPY"))
+
+    def test_get_recent_options_activity_handles_broker_error(self):
+        from unittest.mock import patch
+        with patch.object(data_loader, "get_order_history_safe",
+                          return_value={"ok": False, "error": "no creds", "orders": []}):
+            payload = data_loader.get_recent_options_activity()
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["orders"], [])
+
+
+class TestAuthoritativeRiskThresholds(unittest.TestCase):
+    def test_state_thresholds_loaded_from_capital_gate(self):
+        rows = data_loader.get_authoritative_state_thresholds()
+        # All seven canonical state names must be present
+        names = {r["state"] for r in rows}
+        self.assertEqual(
+            names,
+            {"economic", "financial", "fiscal", "portfolio", "fundamental", "market", "sector"},
+        )
+        for r in rows:
+            self.assertIn("minimum", r)
+            self.assertIn("full", r)
+            self.assertGreaterEqual(r["full"], r["minimum"])
+            self.assertGreater(r["full"], 0.0)
+            self.assertLessEqual(r["full"], 1.0)
+
+    def test_drawdown_thresholds_return_numbers(self):
+        t = data_loader.get_drawdown_thresholds()
+        self.assertIn("flatten", t)
+        self.assertIn("reduce", t)
+        self.assertGreater(t["flatten"], t["reduce"])
+        self.assertGreater(t["flatten"], 0.0)
+        self.assertLess(t["flatten"], 1.0)
+
+
+class TestSevenAgentsAuthoritative(unittest.TestCase):
+    def setUp(self):
+        self.cycle = {
+            "regime": "R01",
+            "ensemble_signal": 0.45,
+            "effective_confidence": 0.81,
+            "agent_signals": {"agent1": 0.5, "agent2": 0.3},  # legacy
+            "agent_outputs_full": {
+                "agent1": {"signal": 0.5, "confidence": 0.9, "uncertainty": 0.1,
+                           "doubt": 0.05, "p_plus": 0.7, "p_minus": 0.2,
+                           "delta_t": 1.0, "noise": 0.3, "weight": 0.16,
+                           "reputation_alpha": 9.0, "reputation_beta": 1.0},
+                "agent2": {"signal": 0.3, "confidence": 0.8, "uncertainty": 0.2,
+                           "doubt": 0.1, "p_plus": 0.6, "p_minus": 0.3,
+                           "delta_t": 1.0, "noise": 0.4, "weight": 0.14,
+                           "reputation_alpha": 5.0, "reputation_beta": 2.0},
+            },
+        }
+
+    def test_full_agent_outputs_surfaced(self):
+        agents = data_loader.get_seven_agents(self.cycle)
+        self.assertEqual(len(agents), 2)
+        for a in agents:
+            for k in ("signal", "confidence", "uncertainty", "doubt",
+                      "p_plus", "p_minus", "delta_t", "noise", "weight",
+                      "reputation_alpha", "reputation_beta"):
+                self.assertIn(k, a)
+        a1 = next(a for a in agents if a["agent_id"] == "agent1")
+        self.assertEqual(a1["signal"], 0.5)
+        self.assertEqual(a1["reputation_alpha"], 9.0)
+        self.assertEqual(a1["weight"], 0.16)
+
+    def test_legacy_fallback_when_no_full_outputs(self):
+        self.cycle.pop("agent_outputs_full", None)
+        agents = data_loader.get_seven_agents(self.cycle)
+        self.assertEqual(len(agents), 2)
+        for a in agents:
+            # Legacy fallback only carries scalar signal + coarse confidence
+            self.assertIn(a["status"], ("ok", "ok (legacy)"))
+            self.assertEqual(a["weight"], 0.0)
+
+
+class TestEquityCurveAccounting(unittest.TestCase):
+    def test_incremental_convention_default(self):
+        rows = [
+            {"timestamp": "t1", "pnl": 100.0},
+            {"timestamp": "t2", "pnl": -50.0},
+            {"timestamp": "t3", "pnl": 75.0},
+        ]
+        curve = data_loader.compute_equity_curve(rows, starting_equity=100000.0)
+        self.assertEqual(curve[0]["equity"], 100100.0)
+        self.assertEqual(curve[1]["equity"], 100050.0)
+        self.assertEqual(curve[2]["equity"], 100125.0)
+
+    def test_drawdown_thresholds_read_from_capital_gate(self):
+        # When the module exposes DRAWDOWN_FLATTEN_PCT /
+        # DRAWDOWN_REDUCE_PCT we should read them authoritatively
+        # rather than falling back to hard-coded values.
+        from investment_agent.capital import capital_gate
+        if hasattr(capital_gate, "DRAWDOWN_FLATTEN_PCT"):
+            result = data_loader.get_drawdown_thresholds()
+            self.assertEqual(
+                result["flatten"],
+                float(capital_gate.DRAWDOWN_FLATTEN_PCT),
+            )
+        # Reduce key always present.
+        result = data_loader.get_drawdown_thresholds()
+        self.assertIn("reduce", result)
+
+    def test_cumulative_convention(self):
+        rows = [
+            {"timestamp": "t1", "pnl": 100.0},   # running total = 100
+            {"timestamp": "t2", "pnl": 100050.0},  # running total = 100050
+        ]
+        curve = data_loader.compute_equity_curve(rows, starting_equity=100000.0,
+                                                  pnl_convention="cumulative")
+        # In cumulative mode each row's pnl is the running total. We
+        # use the running max because the series is monotonically
+        # increasing (downstream the chart's drawdown is the peak).
+        self.assertEqual(curve[0]["equity"], 100.0)
+        self.assertEqual(curve[-1]["equity"], 100050.0)
+
+    def test_unknown_convention_raises(self):
+        with self.assertRaises(ValueError):
+            data_loader.compute_equity_curve([], pnl_convention="bogus")
+
+    def test_strategy_equity_summary(self):
+        rows = [
+            {"timestamp": "t1", "pnl": 100.0},
+            {"timestamp": "t2", "pnl": -50.0},
+        ]
+        s = data_loader.get_strategy_equity_summary(rows, starting_equity=100000.0)
+        self.assertEqual(s["current_equity"], 100050.0)
+        self.assertEqual(s["realized_pnl"], 50.0)
+        self.assertEqual(s["trade_count"], 2)
+
+
+class TestSevenAgentsAuthoritativeBackedByOrchestrator(unittest.TestCase):
+    """End-to-end: orchestrator writes the full per-agent data; the
+    dashboard reads it without re-deriving anything."""
+
+    def test_orchestrator_writes_agent_outputs_full(self):
+        from investment_agent.orchestrator import XQuantXOrchestrator
+        from investment_agent.capital.capital_gate import SevenStateVector
+        from investment_agent.signals.ensemble_signal import AgentOutput
+        from investment_agent.memory.trade_memory import TradeLifecycle
+        import tempfile
+        import uuid
+
+        with tempfile.TemporaryDirectory() as d:
+            mem_file = f"{d}/mem.json"
+            orch = XQuantXOrchestrator(
+                agent_ids=["agent1", "agent2", "agent3", "agent4",
+                           "agent5", "agent6", "agent7"],
+                symbol="AAPL",
+                use_hmm=False,
+                enable_trading=False,
+                memory_file=mem_file,
+            )
+            agent_outputs = [
+                AgentOutput(s=0.5, c=0.9, u=0.1, d=0.05, p_plus=0.7, p_minus=0.2,
+                            delta_t=1.0, r=0.3, agent_id=f"agent{i + 1}")
+                for i in range(7)
+            ]
+            states = SevenStateVector(
+                economic=1.0, financial=1.0, fiscal=1.0,
+                portfolio=1.0, fundamental=1.0, market=1.0, sector=1.0,
+            )
+            result = orch.run_cycle(
+                prices=[100.0 + i * 0.1 for i in range(45)],
+                volumes=[1000.0] * 45,
+                agent_outputs=agent_outputs,
+                states=states,
+                portfolio_context={
+                    "position_pct": 0.05, "gross_leverage": 0.5, "entropy": 0.1,
+                    "drawdown_pct": 0.01, "execution_timeout_seconds": 5.0,
+                    "sector_exposure_pct": 0.1, "is_new_long": False, "regime": "R01",
+                    "available_liquidity": 100000.0,
+                },
+            )
+            self.assertEqual(result.experience.lifecycle_status,
+                             TradeLifecycle.PENDING_FILL.value)
+            aof = result.experience.agent_outputs_full
+            self.assertIsNotNone(aof)
+            self.assertEqual(set(aof.keys()),
+                             {"agent1", "agent2", "agent3", "agent4",
+                              "agent5", "agent6", "agent7"})
+            for aid, row in aof.items():
+                self.assertIn("signal", row)
+                self.assertIn("confidence", row)
+                self.assertIn("uncertainty", row)
+                self.assertIn("p_plus", row)
+                self.assertIn("p_minus", row)
+                self.assertIn("weight", row)
+                self.assertIn("reputation_alpha", row)
+                self.assertIn("reputation_beta", row)
+            # And the kalman provenance fields are also authoritative
+            self.assertIsNotNone(result.experience.investment_kalman_gain)
+            self.assertIsNotNone(result.experience.kalman_posterior)
+            self.assertIsNotNone(result.experience.kalman_prior)
+            self.assertIsNotNone(result.experience.kalman_observation)
+
+
+class TestChartBuildersAuthoritative(unittest.TestCase):
+    """Chart-level tests for the P0 data-integrity changes."""
+
+    def test_seven_agents_table_surfaces_full_channels(self):
+        from investment_agent.dashboard import charts
+        agents = [{
+            "agent_id": "agent_economic",
+            "signal": 0.42,
+            "confidence": 0.81,
+            "uncertainty": 0.18,
+            "doubt": 0.07,
+            "p_bull": 0.62,
+            "p_bear": 0.38,
+            "decision_time_ms": 410,
+            "kalman_noise": 0.012,
+            "weight": 0.14,
+            "alpha": 9.0,
+            "beta": 1.0,
+            "status": "ok (authoritative)",
+        }]
+        fig = charts.build_seven_agents_table(agents)
+        self.assertIsNotNone(fig)
+        # The header should include the new columns.
+        header_text = fig.layout.title.text
+        self.assertIn("full per-agent channels", header_text)
+        header_values = list(fig.data[0].header.values)
+        self.assertIn("Unc", header_values)
+        self.assertIn("Doubt", header_values)
+        self.assertIn("p_Bull", header_values)
+        self.assertIn("p_Bear", header_values)
+        self.assertIn("Δt", header_values)
+        self.assertIn("Reputation", header_values)
+
+    def test_seven_agents_table_legacy_fallback_graceful(self):
+        from investment_agent.dashboard import charts
+        # Legacy row missing the extended fields.
+        agents = [{"agent_id": "a1", "signal": 0.5, "confidence": 0.8, "weight": 0.1, "status": "ok (legacy)"}]
+        fig = charts.build_seven_agents_table(agents)
+        self.assertIsNotNone(fig)
+        # Extended columns should render "—" rather than raise.
+        cell_values = list(fig.data[0].cells.values)
+        self.assertEqual(cell_values[3], ["—"])  # Unc
+        self.assertEqual(cell_values[9], ["—"])  # Reputation
+
+    def test_kalman_chart_labels_authoritative(self):
+        from investment_agent.dashboard import charts
+        k_auth = {
+            "kalman_gain": 0.73, "prior_confidence": 0.61,
+            "market_observation": 0.84, "posterior_estimate": 0.78,
+            "posterior_authoritative": True,
+        }
+        fig = charts.build_kalman_chart(k_auth)
+        self.assertIsNotNone(fig)
+        self.assertIn("authoritative (state-gated)", fig.layout.title.text)
+
+        k_legacy = dict(k_auth, posterior_authoritative=False)
+        fig2 = charts.build_kalman_chart(k_legacy)
+        self.assertIsNotNone(fig2)
+        self.assertIn("reconstructed (legacy)", fig2.layout.title.text)
+
+    def test_options_table_renders_error_message(self):
+        from investment_agent.dashboard import charts
+        fig = charts.build_options_table([], error="401 unauthorized")
+        self.assertIsNotNone(fig)
+        # The error message is rendered as a centred annotation.
+        annotations = " ".join(a.text for a in fig.layout.annotations)
+        self.assertIn("401 unauthorized", annotations)
+
+    def test_options_table_with_broker_order(self):
+        from investment_agent.dashboard import charts
+        rows = [{
+            "underlying": "SPY",
+            "symbol": "SPY260620P00425000",
+            "side": "BUY",
+            "type": "limit",
+            "qty": 1,
+            "filled_qty": 1,
+            "status": "filled",
+        }]
+        fig = charts.build_options_table(rows)
+        self.assertIsNotNone(fig)
+        cell_values = list(fig.data[0].cells.values)
+        self.assertEqual(cell_values[0], ["SPY"])
+        self.assertEqual(cell_values[1], ["SPY260620P00425000"])
+        self.assertIn("real broker /orders filter", fig.layout.title.text)
+
+    def test_equity_curve_chart_with_source_label(self):
+        from investment_agent.dashboard import charts
+        rows = [
+            {"timestamp": "t1", "equity": 100100.0, "peak": 100100.0, "drawdown_pct": 0.0, "pnl": 100.0},
+            {"timestamp": "t2", "equity": 100050.0, "peak": 100100.0, "drawdown_pct": -0.0005, "pnl": -50.0},
+        ]
+        fig = charts.build_equity_curve_chart(rows, source="strategy")
+        self.assertIsNotNone(fig)
+        self.assertIn("[strategy]", fig.layout.title.text)
+
+    def test_drawdown_waterfall_uses_authoritative_thresholds(self):
+        from investment_agent.dashboard import charts
+        rows = [{"timestamp": "t1", "equity": 100000.0, "peak": 100000.0, "drawdown_pct": 0.0, "pnl": 0.0}]
+        fig = charts.build_drawdown_waterfall_chart(rows, flatten_pct=0.20, reduce_pct=0.12)
+        self.assertIsNotNone(fig)
+        # Threshold annotations should reflect the override (20% / 12%).
+        annotations = [a.text for a in fig.layout.annotations]
+        joined = " ".join(annotations)
+        self.assertIn("-20%", joined)
+        self.assertIn("-12%", joined)
 
 
 if __name__ == "__main__":

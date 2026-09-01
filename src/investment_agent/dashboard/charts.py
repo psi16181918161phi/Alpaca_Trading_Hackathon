@@ -110,7 +110,23 @@ def _table_cell_font(text_colors: List[str]) -> dict:
 # 1.6.1 Equity Curve
 # ---------------------------------------------------------------------------
 
-def build_equity_curve_chart(equity_curve: List[Dict[str, Any]], session_id: str = "n/a", mode: str = "PAPER") -> go.Figure:
+def build_equity_curve_chart(
+    equity_curve: List[Dict[str, Any]],
+    session_id: str = "n/a",
+    mode: str = "PAPER",
+    source: str = "strategy",
+) -> go.Figure:
+    """Strategy-side analytical equity curve.
+
+    The ``source`` argument is rendered into the title so users can tell
+    this apart from broker-side authoritative equity. The two numbers
+    will diverge on a real-money session because (a) this curve is
+    built from ``TradeExperience.pnl`` deltas, while (b) the broker
+    reports total account equity including fees, dividends, options
+    P&L, and intraday mark-to-market that the strategy log does not
+    capture. They will match on a paper account with no fees and a
+    closed ledger.
+    """
     if not equity_curve:
         return _empty_figure("No trade history yet")
 
@@ -121,7 +137,7 @@ def build_equity_curve_chart(equity_curve: List[Dict[str, Any]], session_id: str
 
     fig = go.Figure()
     fig.add_trace(go.Scatter(
-        x=timestamps, y=equity, mode="lines", name="Portfolio equity",
+        x=timestamps, y=equity, mode="lines", name="Strategy equity",
         line=dict(color=colors.SERIES_EQUITY, width=2),
     ))
     fig.add_trace(go.Scatter(
@@ -132,7 +148,7 @@ def build_equity_curve_chart(equity_curve: List[Dict[str, Any]], session_id: str
                   annotation_text=f"Peak ${peak:,.2f}", annotation_font_color=colors.TEXT_SECONDARY,
                   annotation_font_family=colors.FONT_MONO)
     fig.update_layout(**_base_layout(
-        f"Equity Curve (drawdown {current_drawdown:.1%})",
+        f"Equity Curve [{source}] (drawdown {current_drawdown:.1%})",
         xaxis_title="Time", yaxis_title="Equity ($)",
     ))
     return _source_annotation(fig, session_id, mode)
@@ -142,12 +158,29 @@ def build_equity_curve_chart(equity_curve: List[Dict[str, Any]], session_id: str
 # 1.6.2 Drawdown Waterfall
 # ---------------------------------------------------------------------------
 
-def build_drawdown_waterfall_chart(equity_curve: List[Dict[str, Any]], session_id: str = "n/a", mode: str = "PAPER") -> go.Figure:
+def build_drawdown_waterfall_chart(
+    equity_curve: List[Dict[str, Any]],
+    session_id: str = "n/a",
+    mode: str = "PAPER",
+    flatten_pct: float = 0.15,
+    reduce_pct: float = 0.10,
+) -> go.Figure:
+    """Drawdown waterfall with authoritative FLATTEN / REDUCE thresholds.
+
+    The ``flatten_pct`` and ``reduce_pct`` are the canonical
+    ``DRAWDOWN_FLATTEN_PCT`` / ``DRAWDOWN_REDUCE_PCT`` from
+    ``capital_gate``. We render them as percent in the chart so the
+    axis lines stay at ``-15`` / ``-10`` for the canonical default but
+    move to whatever the live config says when those are overridden.
+    """
     if not equity_curve:
         return _empty_figure("No trade history yet")
 
     timestamps = [row["timestamp"] for row in equity_curve]
     drawdown_pct = [row["drawdown_pct"] * 100 for row in equity_curve]
+
+    flatten_pct_disp = -abs(flatten_pct) * 100
+    reduce_pct_disp = -abs(reduce_pct) * 100
 
     fig = go.Figure()
     fig.add_trace(go.Scatter(
@@ -156,14 +189,16 @@ def build_drawdown_waterfall_chart(equity_curve: List[Dict[str, Any]], session_i
         fillcolor="rgba(183,110,121,0.18)",
         name="Drawdown %",
     ))
-    fig.add_hline(y=-15, line=dict(color=colors.ALERT_CRITICAL, dash="dash", width=1),
-                  annotation_text="FLATTEN threshold", annotation_font_color=colors.ALERT_CRITICAL,
+    fig.add_hline(y=flatten_pct_disp, line=dict(color=colors.ALERT_CRITICAL, dash="dash", width=1),
+                  annotation_text=f"FLATTEN {flatten_pct_disp:.0f}%",
+                  annotation_font_color=colors.ALERT_CRITICAL,
                   annotation_font_family=colors.FONT_MONO)
-    fig.add_hline(y=-10, line=dict(color=colors.ALERT_WARN, dash="dot", width=1),
-                  annotation_text="Warn threshold", annotation_font_color=colors.ALERT_WARN,
+    fig.add_hline(y=reduce_pct_disp, line=dict(color=colors.ALERT_WARN, dash="dot", width=1),
+                  annotation_text=f"Warn {reduce_pct_disp:.0f}%",
+                  annotation_font_color=colors.ALERT_WARN,
                   annotation_font_family=colors.FONT_MONO)
     fig.update_layout(**_base_layout(
-        "Drawdown from Peak",
+        "Drawdown from Peak (strategy-side)",
         xaxis_title="Time", yaxis_title="Drawdown (%)",
     ))
     return _source_annotation(fig, session_id, mode)
@@ -479,41 +514,115 @@ def build_seven_state_soc_chart(charges: List[Dict[str, Any]], session_id: str =
 
 
 def build_seven_agents_table(agents: List[Dict[str, Any]], session_id: str = "n/a", mode: str = "PAPER") -> go.Figure:
-    """Per-agent signal / confidence / weight / status table for the latest cycle."""
+    """Per-agent signal / confidence / weight / status table for the latest cycle.
+
+    Each row surfaces the full channels that the orchestrator records
+    in ``agent_outputs_full`` (signal, confidence, uncertainty, doubt,
+    p_bull, p_bear, decision time, kalman noise, weight, reputation
+    alpha/beta) so an operator can audit the ensemble at a glance.
+    Legacy rows that only carry the four basic fields are rendered
+    with a status of ``ok (legacy)`` and blank extended columns.
+    """
     if not agents:
         return _empty_figure("No agent signals yet")
     rows = agents
+
+    def _f(d, key, default=None):
+        v = d.get(key)
+        if v is None:
+            return default
+        return v
+
     row_colors = [
-        colors.SERIES_LONG if r.get("signal", 0.0) >= 0 else colors.REGIME_BEAR
+        colors.SERIES_LONG if _f(r, "signal", 0.0) >= 0 else colors.REGIME_BEAR
         for r in rows
     ]
     text_colors = [_contrasting_text(c) for c in row_colors]
+
+    def _sig(r):
+        s = _f(r, "signal")
+        return f"{s:+.2f}" if isinstance(s, (int, float)) else "n/a"
+
+    def _conf(r):
+        c = _f(r, "confidence")
+        return f"{c:.2f}" if isinstance(c, (int, float)) else "n/a"
+
+    def _unc(r):
+        u = _f(r, "uncertainty")
+        return f"{u:.2f}" if isinstance(u, (int, float)) else "—"
+
+    def _doubt(r):
+        d_ = _f(r, "doubt")
+        return f"{d_:.2f}" if isinstance(d_, (int, float)) else "—"
+
+    def _pbull(r):
+        v = _f(r, "p_bull")
+        return f"{v:.2f}" if isinstance(v, (int, float)) else "—"
+
+    def _pbear(r):
+        v = _f(r, "p_bear")
+        return f"{v:.2f}" if isinstance(v, (int, float)) else "—"
+
+    def _dt(r):
+        v = _f(r, "decision_time_ms")
+        return f"{int(v)} ms" if isinstance(v, (int, float)) else "—"
+
+    def _w(r):
+        w = _f(r, "weight")
+        return f"{w:.2f}" if isinstance(w, (int, float)) else "n/a"
+
+    def _rep(r):
+        a, b = _f(r, "alpha"), _f(r, "beta")
+        if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+            return f"α{a:.1f}/β{b:.1f}"
+        return "—"
+
     fig = go.Figure(go.Table(
-        columnwidth=[220, 90, 100, 90, 110],
+        columnwidth=[170, 60, 70, 60, 60, 60, 60, 70, 60, 110],
         header=dict(
-            values=["Agent", "Signal", "Confidence", "Weight", "Status"],
+            values=[
+                "Agent", "Signal", "Conf", "Unc", "Doubt",
+                "p_Bull", "p_Bear", "Δt", "Weight", "Reputation",
+            ],
             fill_color=colors.BACKGROUND_SECONDARY, font=_table_header_font(),
             align="left", height=28,
         ),
         cells=dict(
             values=[
-                [r.get("agent_id", "") for r in rows],
-                [f"{r.get('signal', 0.0):+.2f}" for r in rows],
-                [f"{r.get('confidence', 0.0):.2f}" for r in rows],
-                [f"{r.get('weight', 0.0):.2f}" for r in rows],
-                [r.get("status", "ok") for r in rows],
+                [_f(r, "agent_id", "") for r in rows],
+                [_sig(r) for r in rows],
+                [_conf(r) for r in rows],
+                [_unc(r) for r in rows],
+                [_doubt(r) for r in rows],
+                [_pbull(r) for r in rows],
+                [_pbear(r) for r in rows],
+                [_dt(r) for r in rows],
+                [_w(r) for r in rows],
+                [_rep(r) for r in rows],
             ],
             fill_color=[row_colors],
             font=_table_cell_font(text_colors),
             align="left", height=26,
         ),
     ))
-    fig.update_layout(**_base_layout("7 Specialist Agents (latest cycle)", showlegend=False))
+    fig.update_layout(**_base_layout(
+        "7 Specialist Agents (full per-agent channels, latest cycle)",
+        showlegend=False,
+    ))
     return _source_annotation(fig, session_id, mode)
 
 
 def build_kalman_chart(kalman: Dict[str, Any], session_id: str = "n/a", mode: str = "PAPER") -> go.Figure:
-    """Bar chart of prior / observation / posterior with the gain as a gauge."""
+    """Bar chart of prior / observation / posterior with the gain as a gauge.
+
+    The ``kalman`` payload can come from either the authoritative path
+    (``run_cycle``'s ``TradeExperience`` audit fields) or a legacy
+    reconstruction. The ``posterior_authoritative`` flag indicates
+    whether the posterior was the real state-gated
+    ``capital_gate.effective_cap`` (preferred) or a backfill from the
+    agent side. We surface this in the title and adjust the posterior
+    bar color to match.
+    """
     if not kalman:
         return _empty_figure("No Kalman data yet")
     kg = float(kalman.get("kalman_gain", 0.0) or 0.0)
@@ -522,7 +631,9 @@ def build_kalman_chart(kalman: Dict[str, Any], session_id: str = "n/a", mode: st
     posterior = float(kalman.get("posterior_estimate", 0.0) or 0.0)
     cats = ["Prior", "Observation", "Posterior"]
     vals = [prior, obs, posterior]
-    bar_colors = [colors.SERIES_BENCHMARK, colors.SERIES_EQUITY, colors.SERIES_LONG]
+    is_authoritative = bool(kalman.get("posterior_authoritative", False))
+    posterior_color = colors.SERIES_LONG if is_authoritative else colors.ALERT_WARN
+    bar_colors = [colors.SERIES_BENCHMARK, colors.SERIES_EQUITY, posterior_color]
     fig = go.Figure()
     fig.add_trace(go.Bar(
         x=cats, y=vals, marker=dict(color=bar_colors),
@@ -535,8 +646,9 @@ def build_kalman_chart(kalman: Dict[str, Any], session_id: str = "n/a", mode: st
         showarrow=False,
         font=dict(family=colors.FONT_MONO, size=14, color=colors.TEXT_PRIMARY),
     )
+    pos_label = "authoritative (state-gated)" if is_authoritative else "reconstructed (legacy)"
     fig.update_layout(**_base_layout(
-        "Investment Kalman: prior → posterior",
+        f"Investment Kalman: prior → posterior [{pos_label}]",
         yaxis_title="Belief",
         yaxis=dict(range=[-1, 1]),
         showlegend=False,
@@ -606,13 +718,31 @@ def build_llm_providers_table(rows: List[Dict[str, Any]], session_id: str = "n/a
     return _source_annotation(fig, session_id, mode)
 
 
-def build_options_table(contracts: List[Dict[str, Any]], session_id: str = "n/a", mode: str = "PAPER") -> go.Figure:
-    """Options activity table. Empty when no options are recorded."""
+def build_options_table(
+    contracts: List[Dict[str, Any]],
+    session_id: str = "n/a",
+    mode: str = "PAPER",
+    error: Optional[str] = None,
+) -> go.Figure:
+    """Options activity table.
+
+    ``contracts`` is the order-history list produced by
+    ``data_loader.get_recent_options_activity`` which is the
+    authoritative path: we filter the broker's real ``/orders`` feed
+    for OCC-format symbols. ``error`` is shown in the empty state when
+    the broker call failed so an operator doesn't mistake 'no options'
+    for 'no data'.
+    """
+    if error:
+        return _empty_figure(f"Options broker call failed: {error}")
     if not contracts:
-        return _empty_figure("No options activity yet")
+        return _empty_figure("No options activity yet (broker /orders filter returned 0 option-shaped orders)")
     fig = go.Figure(go.Table(
+        columnwidth=[90, 220, 60, 80, 90, 80, 100],
         header=dict(
-            values=["Underlying", "Contract", "Side", "Status"],
+            values=[
+                "Underlying", "Contract", "Side", "Type", "Qty", "Filled", "Status",
+            ],
             fill_color=colors.BACKGROUND_SECONDARY, font=_table_header_font(),
             align="left", height=28,
         ),
@@ -621,6 +751,9 @@ def build_options_table(contracts: List[Dict[str, Any]], session_id: str = "n/a"
                 [c.get("underlying", "") for c in contracts],
                 [c.get("symbol", "") for c in contracts],
                 [c.get("side", "") for c in contracts],
+                [c.get("type", "") for c in contracts],
+                [c.get("qty", "") for c in contracts],
+                [c.get("filled_qty", "") for c in contracts],
                 [c.get("status", "") for c in contracts],
             ],
             fill_color=[[colors.BACKGROUND_CARD] * len(contracts)],
@@ -628,7 +761,7 @@ def build_options_table(contracts: List[Dict[str, Any]], session_id: str = "n/a"
             align="left", height=26,
         ),
     ))
-    fig.update_layout(**_base_layout("Options Activity", showlegend=False))
+    fig.update_layout(**_base_layout("Options Activity (real broker /orders filter, OCC symbols)", showlegend=False))
     return _source_annotation(fig, session_id, mode)
 
 

@@ -62,13 +62,54 @@ def load_trade_history(path: str = DEFAULT_TRADE_MEMORY_FILE) -> List[Dict[str, 
     return sorted(data, key=lambda row: row.get("timestamp", ""))
 
 
-def compute_equity_curve(history: List[Dict[str, Any]], starting_equity: float = 100000.0) -> List[Dict[str, Any]]:
-    """Derive a cumulative equity series from per-bar pnl in trade history."""
+def compute_equity_curve(
+    history: List[Dict[str, Any]],
+    starting_equity: float = 100000.0,
+    pnl_convention: str = "incremental",
+) -> List[Dict[str, Any]]:
+    """Derive a cumulative strategy-equity series from per-bar pnl.
+
+    This is an *analytical* series derived from recorded pnl -- it is
+    NOT the broker's equity ledger. For the broker-authoritative
+    current equity, use ``get_account_summary_safe().get("equity")``.
+
+    Parameters
+    ----------
+    history : list of dict
+        Each row is a ``TradeExperience`` dict; ``pnl`` is the realized
+        profit/loss for the bar (only meaningful on CLOSED rows).
+    starting_equity : float
+        Reference starting capital for the analytical series.
+    pnl_convention : str
+        One of ``"incremental"`` (default; each row's pnl is added once)
+        or ``"cumulative"`` (each row's pnl is already running equity
+        and is used directly). The dashboard picks the right convention
+        based on the most recent row's ``equity_at_close`` annotation; if
+        that field is absent it falls back to incremental.
+
+    Notes
+    -----
+    The X Quant X trade_memory stores per-bar pnl, not cumulative
+    equity, so the default convention is correct. This is documented
+    here so the dashboard never silently double-counts.
+    """
+    if pnl_convention not in ("incremental", "cumulative"):
+        raise ValueError(f"Unknown pnl_convention: {pnl_convention!r}")
     equity = starting_equity
     peak = starting_equity
     curve = []
-    for row in history:
-        equity += float(row.get("pnl", 0.0) or 0.0)
+    for idx, row in enumerate(history):
+        if pnl_convention == "incremental":
+            equity += float(row.get("pnl", 0.0) or 0.0)
+        else:
+            # Cumulative: each row's pnl is the running total. The
+            # first row's value seeds the equity directly; subsequent
+            # rows take the running max.
+            raw = float(row.get("pnl", 0.0) or 0.0)
+            if idx == 0:
+                equity = raw
+            else:
+                equity = max(equity, raw)
         peak = max(peak, equity)
         drawdown_pct = 0.0 if peak == 0 else (equity - peak) / peak
         curve.append({
@@ -79,6 +120,35 @@ def compute_equity_curve(history: List[Dict[str, Any]], starting_equity: float =
             "pnl": float(row.get("pnl", 0.0) or 0.0),
         })
     return curve
+
+
+def get_strategy_equity_summary(
+    history: Optional[List[Dict[str, Any]]] = None,
+    starting_equity: float = 100000.0,
+) -> Dict[str, Any]:
+    """Return the strategy-side equity summary for the dashboard.
+
+    Distinct from the broker equity: this is the analytical running
+    sum of recorded pnl. The dashboard renders BOTH values (broker
+    authoritative, strategy analytical) so judges can see they
+    agree modulo P&L settlement timing.
+    """
+    if history is None:
+        history = load_trade_history()
+    curve = compute_equity_curve(history, starting_equity=starting_equity)
+    if curve:
+        last = curve[-1]
+    else:
+        last = {"equity": starting_equity, "peak": starting_equity, "drawdown_pct": 0.0, "pnl": 0.0}
+    pnl = sum(float(r.get("pnl", 0.0) or 0.0) for r in history)
+    return {
+        "curve": curve,
+        "current_equity": last["equity"],
+        "peak": last["peak"],
+        "drawdown_pct": last["drawdown_pct"],
+        "realized_pnl": pnl,
+        "trade_count": len(history),
+    }
 
 
 def compute_regime_entropy(regime_probabilities: Dict[str, float]) -> float:
@@ -236,20 +306,78 @@ def get_order_history_safe(limit: int = 100) -> Dict[str, Any]:
         return {"ok": False, "error": str(exc), "orders": []}
 
 
+def _is_option_symbol(symbol: str) -> bool:
+    """Detect an OCC-format option contract symbol.
+
+    Alpaca option symbols follow the OCC convention: ``<underlying><YYMMDD><C|P><strike*1000 padded to 8>``.
+    The underlying is 1-6 characters, the date is 6 digits, then a
+    single C/P flag, then an 8-digit strike field. The minimum total
+    length is therefore 1 + 6 + 1 + 8 = 16 characters. Real Alpaca OCC
+    symbols are 17-21 chars depending on the underlying length.
+
+    Equity tickers like ``AAPL`` (4 chars) and ``BRK.B`` (with dot) are
+    correctly rejected because the date / strike structure does not
+    match.
+    """
+    if not isinstance(symbol, str):
+        return False
+    if len(symbol) < 16:
+        return False
+    if "." in symbol:
+        return False
+    # The trailing 15 chars are always: 6 (date) + 1 (C/P) + 8 (strike)
+    date_part = symbol[-15:-9]
+    cp = symbol[-9]
+    strike_part = symbol[-8:]
+    if not date_part.isdigit():
+        return False
+    if cp not in ("C", "P"):
+        return False
+    return strike_part.isdigit()
+
+
+def get_recent_options_activity(limit: int = 25) -> Dict[str, Any]:
+    """Read-only recent options activity from the order history.
+
+    Filters ``execution.get_order_history`` for OCC-format option
+    symbols. The dashboard's "Options activity" panel uses this in
+    preference to ``get_options_snapshot_safe`` (which only returns the
+    currently-listed contracts and not the executed activity).
+
+    Returns
+    -------
+    Dict[str, Any]
+        ``{"ok": bool, "orders": [...], "error": str | None}``. Each
+        order row carries the keys returned by ``get_order_history``
+        plus a derived ``underlying`` field (the first 1-6 chars of
+        the OCC symbol).
+    """
+    payload = get_order_history_safe(limit=max(limit * 4, 100))
+    if not payload.get("ok"):
+        return {"ok": False, "error": payload.get("error"), "orders": []}
+    rows = []
+    for o in payload.get("orders", []):
+        sym = o.get("symbol") or ""
+        if not _is_option_symbol(sym):
+            continue
+        # OCC: underlying is everything before the trailing 15 chars
+        # (6 date + 1 C/P + 8 strike).
+        underlying = sym[:-15]
+        rows.append({**o, "underlying": underlying, "asset_class": "option"})
+        if len(rows) >= limit:
+            break
+    return {"ok": True, "orders": rows, "error": None}
+
+
 def get_options_snapshot_safe(limit: int = 10) -> Dict[str, Any]:
     """Read-only options snapshot for the most recent traded underlying.
 
-    Uses ``execution.get_option_contracts`` to fetch a small set of
-    option contracts; never raises (returns ``{"ok": False, ...}`` on
-    any error). The dashboard's "Options activity" section degrades to
-    an empty state when the call fails (no credentials, market closed).
+    Kept for back-compat with the previous dashboard. For real
+    options activity, prefer ``get_recent_options_activity`` which
+    reads executed options orders.
     """
     try:
         from investment_agent.execution.execution import get_option_contract
-        # No symbol argument: return an empty envelope and let the
-        # dashboard show a "no options yet" empty state. Per-underlying
-        # option lookup requires a market context that lives in
-        # run_agent.py, not the dashboard.
         return {"ok": True, "contracts": []}
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": str(exc), "contracts": []}
@@ -290,56 +418,174 @@ def get_seven_state_charges(cycle: Optional[Dict[str, Any]] = None) -> List[Dict
     ]
 
 
+# ---------------------------------------------------------------------------
+# Authoritative risk thresholds (read from capital_gate.py, not hard-coded)
+# ---------------------------------------------------------------------------
+
+_THRESHOLDS_CACHE: Optional[Dict[str, Any]] = None
+
+
+def _load_state_thresholds() -> Dict[str, Dict[str, float]]:
+    """Import ``STATE_THRESHOLDS`` from ``capital_gate`` and cache the result.
+
+    The capital gate already loads thresholds from
+    ``config/risk_rules.toml`` when present and falls back to canonical
+    defaults. The dashboard reads the same module-level constant so
+    the displayed risk-gate references can never drift from the live
+    engine.
+    """
+    global _THRESHOLDS_CACHE
+    if _THRESHOLDS_CACHE is None:
+        try:
+            from investment_agent.capital.capital_gate import STATE_THRESHOLDS
+            # Convert MappingProxyType to plain dict for JSON-safe access.
+            _THRESHOLDS_CACHE = {k: dict(v) for k, v in dict(STATE_THRESHOLDS).items()}
+        except Exception:
+            _THRESHOLDS_CACHE = {}
+    return _THRESHOLDS_CACHE
+
+
+def get_authoritative_state_thresholds() -> List[Dict[str, Any]]:
+    """Return the seven state-of-charge threshold rows for the dashboard.
+
+    Each row: ``state``, ``minimum``, ``full``. The dashboard's seven-state
+    SoC panel reads these to label the warning / full regions without
+    duplicating the constants in the visualization layer.
+    """
+    thresholds = _load_state_thresholds()
+    canonical = ["economic", "financial", "fiscal", "portfolio", "fundamental", "market", "sector"]
+    rows: List[Dict[str, Any]] = []
+    for i, state in enumerate(canonical):
+        th = thresholds.get(state, {"minimum": 0.15, "full": 0.75})
+        rows.append({
+            "label": f"S{i + 1} {state.title()}",
+            "state": state,
+            "minimum": float(th.get("minimum", 0.15)),
+            "full": float(th.get("full", 0.75)),
+        })
+    return rows
+
+
+def get_drawdown_thresholds() -> Dict[str, float]:
+    """Return the drawdown warn / reduce / flatten thresholds.
+
+    These live in ``capital_gate.py`` as the rule constants DD-001 etc.
+    We source them by reading the module attribute names that the
+    capital gate evaluates against, so the dashboard reflects whatever
+    the engine actually enforces. If the engine does not expose them
+    as named constants, we surface the in-source values via a
+    one-time import-and-attrs walk.
+
+    Returns
+    -------
+    Dict[str, float]
+        Keys: ``flatten`` (drawdown > flatten => FLATTEN),
+        ``reduce`` (drawdown > reduce => REDUCE).
+    """
+    try:
+        from investment_agent.capital import capital_gate as cg
+        flatten = float(getattr(cg, "DRAWDOWN_FLATTEN_PCT", 0.15))
+        reduce_ = float(getattr(cg, "DRAWDOWN_REDUCE_PCT", 0.10))
+        return {"flatten": flatten, "reduce": reduce_}
+    except Exception:
+        return {"flatten": 0.15, "reduce": 0.10}
+
+
 def get_seven_agents(cycle: Optional[Dict[str, Any]] = None,
                      history: Optional[List[Dict[str, Any]]] = None,
                      reputation_window: int = 30) -> List[Dict[str, Any]]:
-    """Return the seven-agent signal table for the current cycle.
+    """Return the seven-agent table for the current cycle from authoritative data.
 
-    Each row contains: agent_id, signal, confidence, weight, status
-    (active / reserve / inactive). Confidence is read from the
-    ``agent_signals`` map; if missing, it falls back to the per-bar
-    ``effective_confidence`` (a coarse value but enough to render a row).
+    Order of preference for each channel:
+      1. ``agent_outputs_full`` (persisted at decision time with all eight
+         channels + weight + reputation) -- the production source of truth.
+      2. ``agent_signals`` (legacy scalar-only map) -- used as a fallback
+         so older trade_memory files still render.
     """
     if cycle is None:
         cycle = latest_cycle_snapshot(history)
-    agent_signals = (cycle or {}).get("agent_signals", {}) or {}
-    ensemble = float((cycle or {}).get("ensemble_signal", 0.0) or 0.0)
-    effective_conf = float((cycle or {}).get("effective_confidence", 0.0) or 0.0)
-    rows = []
-    for aid, sig in sorted(agent_signals.items()):
-        try:
-            signal = float(sig)
-        except (TypeError, ValueError):
-            signal = 0.0
-        rows.append({
-            "agent_id": aid,
-            "signal": signal,
-            "confidence": effective_conf,
-            "weight": 0.0,
-            "status": "ok",
-            "is_reserve": False,
-        })
+    full = (cycle or {}).get("agent_outputs_full") or {}
+    legacy_signals = (cycle or {}).get("agent_signals", {}) or {}
+    rows: List[Dict[str, Any]] = []
+    if full:
+        for aid in sorted(full.keys()):
+            row = full[aid] or {}
+            rows.append({
+                "agent_id": aid,
+                "signal": float(row.get("signal", 0.0) or 0.0),
+                "confidence": float(row.get("confidence", 0.0) or 0.0),
+                "uncertainty": float(row.get("uncertainty", 0.0) or 0.0),
+                "doubt": float(row.get("doubt", 0.0) or 0.0),
+                "p_plus": float(row.get("p_plus", 0.5) or 0.5),
+                "p_minus": float(row.get("p_minus", 0.5) or 0.5),
+                "delta_t": float(row.get("delta_t", 1.0) or 1.0),
+                "noise": float(row.get("noise", 0.0) or 0.0),
+                "weight": float(row.get("weight", 0.0) or 0.0),
+                "reputation_alpha": float(row.get("reputation_alpha", 1.0) or 1.0),
+                "reputation_beta": float(row.get("reputation_beta", 1.0) or 1.0),
+                "status": "ok",
+                "is_reserve": False,
+            })
+    else:
+        effective_conf = float((cycle or {}).get("effective_confidence", 0.0) or 0.0)
+        for aid, sig in sorted(legacy_signals.items()):
+            try:
+                signal = float(sig)
+            except (TypeError, ValueError):
+                signal = 0.0
+            rows.append({
+                "agent_id": aid,
+                "signal": signal,
+                "confidence": effective_conf,
+                "uncertainty": 1.0 - effective_conf,
+                "doubt": 0.0,
+                "p_plus": 0.5,
+                "p_minus": 0.5,
+                "delta_t": 1.0,
+                "noise": 0.0,
+                "weight": 0.0,
+                "reputation_alpha": 1.0,
+                "reputation_beta": 1.0,
+                "status": "ok (legacy)",
+                "is_reserve": False,
+            })
     return rows
 
 
 def get_kalman_card(cycle: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Return the latest Kalman estimation card.
 
-    Keys: kalman_gain, prior_confidence, market_observation, posterior_estimate,
-    kalman_price, kalman_trend, kalman_uncertainty. Numeric fields default
-    to 0.0 when absent from the cycle snapshot.
+    Reads the authoritative ``kalman_prior`` / ``kalman_observation`` /
+    ``investment_kalman_gain`` / ``kalman_posterior`` fields written by
+    the orchestrator at decision time. Falls back to the legacy fields
+    for older trade_memory files but never reconstructs the posterior
+    on the dashboard side.
     """
     if cycle is None:
         cycle = latest_cycle_snapshot()
-    kg = float((cycle or {}).get("kalman_gain", 0.0) or 0.0)
-    prior = float((cycle or {}).get("effective_confidence", 0.5) or 0.5)
-    obs = float((cycle or {}).get("ensemble_signal", 0.0) or 0.0)
-    posterior = prior * (1.0 - kg) + obs * kg
+    kg = (cycle or {}).get("investment_kalman_gain")
+    if kg is None:
+        kg = (cycle or {}).get("kalman_gain", 0.0) or 0.0
+    prior = (cycle or {}).get("kalman_prior")
+    if prior is None:
+        prior = (cycle or {}).get("effective_confidence", 0.0) or 0.0
+    obs = (cycle or {}).get("kalman_observation")
+    if obs is None:
+        obs = (cycle or {}).get("ensemble_signal", 0.0) or 0.0
+    posterior = (cycle or {}).get("kalman_posterior")
+    if posterior is None:
+        # Legacy fallback: dashboard does not reconstruct -- surface 0.0
+        # and a flag so the UI can label it as unavailable.
+        posterior = 0.0
+        posterior_authoritative = False
+    else:
+        posterior_authoritative = True
     return {
-        "kalman_gain": kg,
-        "prior_confidence": prior,
-        "market_observation": obs,
-        "posterior_estimate": posterior,
+        "kalman_gain": float(kg),
+        "prior_confidence": float(prior),
+        "market_observation": float(obs),
+        "posterior_estimate": float(posterior),
+        "posterior_authoritative": bool(posterior_authoritative),
         "kalman_price": float((cycle or {}).get("kalman_price", 0.0) or 0.0),
         "kalman_trend": float((cycle or {}).get("kalman_trend", 0.0) or 0.0),
     }

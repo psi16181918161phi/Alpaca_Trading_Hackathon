@@ -97,8 +97,12 @@ def _build_control_room():
     trade_outcome_rows = data_loader.get_trade_outcome_learning(history)
     reputation_rows = data_loader.get_reputation_snapshot(history)
     waterfall = data_loader.get_decision_waterfall(cycle, audit_event)
-    options_payload = data_loader.get_options_snapshot_safe()
-    options_rows = options_payload.get("contracts", []) if options_payload.get("ok") else []
+    # Authoritative options payload: real broker /orders filter, with
+    # error surface so a failed broker call doesn't masquerade as
+    # 'no options'.
+    options_payload = data_loader.get_recent_options_activity()
+    options_rows = options_payload.get("orders", []) if options_payload.get("ok") else []
+    options_error = options_payload.get("error")
 
     buying_power = None
     if account.get("ok") and account.get("buying_power") is not None:
@@ -108,13 +112,13 @@ def _build_control_room():
             buying_power = None
     exposure_pct = data_loader.get_top_exposure_pct(positions_payload, buying_power)
 
-    equity_fig = charts.build_equity_curve_chart(equity_curve, SESSION_ID, MODE)
+    equity_fig = charts.build_equity_curve_chart(equity_curve, SESSION_ID, MODE, source="strategy")
     soc_fig = charts.build_seven_state_soc_chart(charges, SESSION_ID, MODE)
     agents_fig = charts.build_seven_agents_table(agents, SESSION_ID, MODE)
     kalman_fig = charts.build_kalman_chart(kalman, SESSION_ID, MODE)
     regime_fig = charts.build_regime_panel_chart(regime_card, SESSION_ID, MODE)
     llm_fig = charts.build_llm_providers_table(llm_rows, SESSION_ID, MODE)
-    options_fig = charts.build_options_table(options_rows, SESSION_ID, MODE)
+    options_fig = charts.build_options_table(options_rows, SESSION_ID, MODE, error=options_error)
     outcome_fig = charts.build_trade_outcome_table(trade_outcome_rows, SESSION_ID, MODE)
     reputation_fig = charts.build_reputation_table(reputation_rows, SESSION_ID, MODE)
     waterfall_fig = charts.build_decision_waterfall(waterfall)

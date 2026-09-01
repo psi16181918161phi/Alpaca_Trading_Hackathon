@@ -69,6 +69,13 @@ _DEFAULT_STATE_THRESHOLDS: Dict[str, Dict[str, float]] = {
 }
 
 
+# Drawdown circuit-breaker thresholds. These are the canonical risk
+# rule bounds and are exposed at module scope so other components
+# (e.g. the dashboard) can read them authoritatively.
+DRAWDOWN_FLATTEN_PCT: float = 0.15
+DRAWDOWN_REDUCE_PCT: float = 0.10
+
+
 def _load_risk_thresholds_from_path(path: Optional[Path]) -> Dict[str, Dict[str, float]]:
     """Load state thresholds from config/risk_rules.toml if present; otherwise fall back to canonical defaults."""
     if path is None or not path.exists() or not path.is_file():
@@ -694,8 +701,8 @@ def evaluate(
     reduce_rules: List[str] = []
 
     # --- A. FLATTEN Triggers (Highest Priority) ---
-    # Rule DD-001: Drawdown > 15% (0.15)
-    if drawdown_pct > 0.15:
+    # Rule DD-001: Drawdown > DRAWDOWN_FLATTEN_PCT (canonical 15%)
+    if drawdown_pct > DRAWDOWN_FLATTEN_PCT:
         flatten_rules.append("DD-001")
 
     # Rule EXEC-001: Execution timeout > 30 seconds
