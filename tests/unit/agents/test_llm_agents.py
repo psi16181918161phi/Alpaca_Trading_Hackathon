@@ -3,6 +3,7 @@
 import json
 import os
 import sys
+import tempfile
 import unittest
 from typing import List
 from unittest.mock import MagicMock, patch
@@ -327,6 +328,132 @@ class TestSpecialistAgentEndToEnd(unittest.TestCase):
         )
         self.assertIsNotNone(result.verdict)
         self.assertGreater(ensemble.ensemble_signal, 0.0)
+
+
+class TestOrchestratorLLMIntegration(unittest.TestCase):
+    """End-to-end: LLM agents → orchestrator.run_cycle_with_llm → cycle result."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.memory_file = os.path.join(self.tmp, "trade_memory.json")
+        self.responder = lambda sys, prompt: json.dumps({
+            "signal": 0.5,
+            "confidence": 0.85,
+            "uncertainty": 0.2,
+            "doubt": 0.1,
+            "p_plus": 0.7,
+            "p_minus": 0.2,
+            "delta_t": 1.0,
+            "noise": 0.4,
+        })
+        self.provider = MockLLMProvider(responder=self.responder)
+
+    def tearDown(self):
+        for f in [self.memory_file]:
+            try:
+                os.remove(f)
+            except OSError:
+                pass
+        try:
+            os.rmdir(self.tmp)
+        except OSError:
+            pass
+
+    def _build_orchestrator(self):
+        from investment_agent.orchestrator import XQuantXOrchestrator
+        return XQuantXOrchestrator(
+            agent_ids=[
+                "agent_economic", "agent_financial", "agent_fiscal",
+                "agent_portfolio", "agent_fundamental", "agent_market",
+                "agent_sector",
+            ],
+            symbol="AAPL",
+            use_hmm=False,
+            enable_trading=False,
+            memory_file=self.memory_file,
+            llm_provider=self.provider,
+        )
+
+    def test_run_cycle_with_llm_produces_decision(self):
+        orch = self._build_orchestrator()
+        prices = [100.0 + i * 0.1 for i in range(45)]
+        volumes = [1000.0] * 45
+        from investment_agent.capital.capital_gate import SevenStateVector
+        states = SevenStateVector(
+            economic=1.0, financial=1.0, fiscal=1.0,
+            portfolio=1.0, fundamental=1.0, market=1.0, sector=1.0,
+        )
+        result = orch.run_cycle_with_llm(
+            prices=prices, volumes=volumes, states=states,
+            portfolio_context={
+                "position_pct": 0.05, "gross_leverage": 0.5, "entropy": 0.1,
+                "drawdown_pct": 0.01, "execution_timeout_seconds": 5.0,
+                "sector_exposure_pct": 0.1, "is_new_long": False, "regime": "R01",
+                "available_liquidity": 100000.0,
+            },
+            regime_features={"rsi": 0.6, "vix": 0.2, "macd": 0.1},
+        )
+        self.assertIsNotNone(result)
+        self.assertEqual(result.decision.symbol, "AAPL")
+        # Mock provider was called 7 times (one per agent).
+        self.assertEqual(self.provider.call_count, 7)
+        # Experience logged as PENDING_FILL
+        from investment_agent.memory.trade_memory import TradeLifecycle
+        self.assertEqual(
+            result.experience.lifecycle_status,
+            TradeLifecycle.PENDING_FILL.value,
+        )
+
+    def test_run_cycle_with_llm_requires_provider(self):
+        from investment_agent.orchestrator import XQuantXOrchestrator
+        orch = XQuantXOrchestrator(
+            agent_ids=["a1", "a2"], symbol="AAPL",
+            memory_file=self.memory_file,
+        )
+        prices = [100.0 + i * 0.1 for i in range(45)]
+        volumes = [1000.0] * 45
+        from investment_agent.capital.capital_gate import SevenStateVector
+        states = SevenStateVector(
+            economic=1.0, financial=1.0, fiscal=1.0,
+            portfolio=1.0, fundamental=1.0, market=1.0, sector=1.0,
+        )
+        with self.assertRaises(RuntimeError):
+            orch.run_cycle_with_llm(
+                prices=prices, volumes=volumes, states=states,
+                portfolio_context={"regime": "R01"},
+            )
+
+    def test_run_cycle_with_llm_close_lifecycle(self):
+        orch = self._build_orchestrator()
+        prices = [100.0 + i * 0.1 for i in range(45)]
+        volumes = [1000.0] * 45
+        from investment_agent.capital.capital_gate import SevenStateVector
+        states = SevenStateVector(
+            economic=1.0, financial=1.0, fiscal=1.0,
+            portfolio=1.0, fundamental=1.0, market=1.0, sector=1.0,
+        )
+        result = orch.run_cycle_with_llm(
+            prices=prices, volumes=volumes, states=states,
+            portfolio_context={
+                "position_pct": 0.05, "gross_leverage": 0.5, "entropy": 0.1,
+                "drawdown_pct": 0.01, "execution_timeout_seconds": 5.0,
+                "sector_exposure_pct": 0.1, "is_new_long": False, "regime": "R01",
+                "available_liquidity": 100000.0,
+            },
+        )
+        # Close with positive P&L -> reputation should be updated
+        before_reputation = orch._reputation_tracker.to_dict()
+        orch.close_trade(
+            decision_id=result.decision.decision_id,
+            realized_outcome="Hit target",
+            pnl=125.0,
+            lesson="LLM-driven signal worked",
+        )
+        # Memory now contains one CLOSED experience
+        history = orch.get_trade_history("AAPL")
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0].lifecycle_status, "CLOSED")
+        self.assertEqual(history[0].pnl, 125.0)
 
 
 if __name__ == "__main__":

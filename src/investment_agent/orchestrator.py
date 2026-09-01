@@ -329,6 +329,7 @@ class XQuantXOrchestrator:
         use_hmm: bool = False,
         enable_trading: bool = False,
         memory_file: str = DEFAULT_MEMORY_FILE,
+        llm_provider: Optional[Any] = None,
     ) -> None:
         if not agent_ids:
             raise ValueError("agent_ids must be non-empty")
@@ -361,6 +362,20 @@ class XQuantXOrchestrator:
         # total capital) only for offline/paper testing.
         self._liquidity_provider: Optional[Callable[[], float]] = None
         self._fallback_liquidity: float = 100000.0
+
+        # Optional LLM-backed specialist agents. When ``llm_provider`` is
+        # provided, ``run_cycle_with_llm`` can call the seven specialists
+        # before falling back into the existing pipeline.
+        self._llm_provider = llm_provider
+        self._specialist_agents: Optional[Dict[str, Any]] = None
+        if llm_provider is not None:
+            try:
+                from .agents.specialist import build_specialist_agents
+                self._specialist_agents = build_specialist_agents(llm_provider)
+            except Exception:
+                # Specialist construction is best-effort: failure here must
+                # not break the deterministic pipeline.
+                self._specialist_agents = None
 
     def set_liquidity_provider(
         self,
@@ -1047,6 +1062,125 @@ class XQuantXOrchestrator:
     def get_performance_summary(self, symbol: Optional[str] = None) -> Dict[str, Any]:
         """Get performance summary from trade history."""
         return self._trade_memory.get_performance_summary(symbol)
+
+    def run_cycle_with_llm(
+        self,
+        prices: List[float],
+        volumes: Optional[List[float]],
+        states: SevenStateVector,
+        portfolio_context: Dict[str, Any],
+        *,
+        regime_features: Optional[Dict[str, float]] = None,
+        sigma_base_squared: float = 1.0,
+    ) -> CycleResult:
+        """One autonomous cycle driven by LLM-backed specialist agents.
+
+        What
+        ====
+        1. Classify regime (HMM or rule-based).
+        2. Retrieve similar closed trades from memory.
+        3. Call every specialist LLM agent with regime + memory context.
+        4. Build ``AgentOutput`` list and feed the existing pipeline
+           (ensemble → Kalman → capital gate → risk → decision).
+
+        Why
+        ====
+        Provides a single entry point that takes raw market data and returns
+        a full ``CycleResult`` without the caller having to manually
+        construct the seven ``AgentOutput`` tuples. The deterministic risk
+        layer (capital gate) remains the hard authority; the LLM only
+        contributes signals.
+
+        Parameters
+        ----------
+        prices : List[float]
+            Historical price series for regime classification.
+        volumes : Optional[List[float]]
+            Historical volume series.
+        states : SevenStateVector
+            Seven-dimensional state-of-charge vector.
+        portfolio_context : Dict[str, Any]
+            Portfolio risk context (must include the standard keys
+            consumed by ``evaluate``).
+        regime_features : Optional[Dict[str, float]]
+            Optional summary of regime features forwarded to each
+            specialist's user prompt.
+        sigma_base_squared : float, optional
+            Base model variance for the investment Kalman gain.
+
+        Returns
+        -------
+        CycleResult
+            Identical to ``run_cycle``. Reputation / memory updates only
+            fire after ``close_trade`` is called.
+        """
+        if self._specialist_agents is None:
+            raise RuntimeError(
+                "run_cycle_with_llm requires an llm_provider at construction; "
+                "pass llm_provider=... to XQuantXOrchestrator(...)"
+            )
+
+        from .agents.specialist import AgentContext, run_agents
+
+        # 1. Classify regime (reuse existing path).
+        regime_result = self._classify_regime(prices, volumes)
+
+        # 2. Retrieve similar memory for prompt context.
+        preview = TradeExperience(
+            decision_id=str(uuid.uuid4()),
+            timestamp=datetime.now(),
+            symbol=self._symbol,
+            regime=regime_result.regime,
+            regime_probabilities=dict(regime_result.regime_affinity),
+            agent_signals={aid: 0.0 for aid in self._agent_ids},
+            ensemble_signal=0.0,
+            disagreement=0.0,
+            effective_confidence=0.5,
+            kalman_gain=0.0,
+            kalman_price=float(prices[-1]) if prices else 0.0,
+            kalman_trend=0.0,
+            capital_gate_verdict="PREVIEW",
+            effective_cap=0.0,
+            state_charges={},
+            position_action="HOLD",
+            quantity=0.0,
+            confidence=0.5,
+            expected_outcome="",
+            realized_outcome="",
+            pnl=0.0,
+            lesson="",
+        )
+        similar_memory = self._trade_memory.find_similar(preview, top_k=5, min_similarity=0.0)
+
+        # 3. Run the seven specialists.
+        ctx = AgentContext(
+            symbol=self._symbol,
+            regime=regime_result.regime,
+            regime_probabilities=dict(regime_result.regime_affinity),
+            features=regime_features or {},
+            ensemble_signal=0.0,
+            disagreement=0.0,
+            peer_agents={},
+            memory=similar_memory,
+        )
+        agent_output_map = run_agents(self._specialist_agents, ctx)
+        agent_outputs: List[AgentOutput] = [
+            agent_output_map[aid] for aid in self._agent_ids if aid in agent_output_map
+        ]
+        # If a caller-supplied agent_ids list doesn't align 1:1 with the
+        # seven default roles, fall back to whatever the LLM produced.
+        if not agent_outputs:
+            agent_outputs = list(agent_output_map.values())
+
+        # 4. Reuse the existing deterministic pipeline.
+        return self.run_cycle(
+            prices=prices,
+            volumes=volumes,
+            agent_outputs=agent_outputs,
+            states=states,
+            portfolio_context=portfolio_context,
+            sigma_base_squared=sigma_base_squared,
+        )
 
 
 # ---------------------------------------------------------------------------
