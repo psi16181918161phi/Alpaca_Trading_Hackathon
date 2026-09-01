@@ -234,7 +234,15 @@ class TestDataLoaderPanels(unittest.TestCase):
             self.assertLessEqual(r["accuracy"], 1.0)
 
     def test_get_reputation_snapshot_uniform_when_no_tracker_persisted(self):
-        rows = data_loader.get_reputation_snapshot(self.history)
+        # Force a no-tracker read so the test is hermetic (it does not
+        # pick up any stray reputation_state.json in the repo root).
+        import os
+        non_existent = os.path.join(
+            tempfile.mkdtemp(), "definitely_does_not_exist.json",
+        )
+        rows = data_loader.get_reputation_snapshot(
+            self.history, regime="R01", reputation_path=non_existent,
+        )
         self.assertEqual(len(rows), 7)
         for r in rows:
             self.assertEqual(r["alpha"], 1.0)
