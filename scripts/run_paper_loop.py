@@ -139,20 +139,55 @@ def _load_market_data(symbol: str, days: int, live: bool):
     return fake, False
 
 
-def _maybe_execute(product: str, symbol: str, action: str,
-                    quantity: float, live: bool) -> Dict[str, Any]:
-    """Submit a paper order via Alpaca. Returns the order result envelope."""
+def _maybe_execute(
+    product: str,
+    symbol: str,
+    action: str,
+    quantity: float,
+    live: bool,
+    option_side: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Submit a paper order via Alpaca. Returns the order result envelope.
+
+    For ``product == "option"`` this looks up a real OCC-format option
+    contract via ``get_option_contract`` and submits the order against
+    that symbol (not the underlying equity). For ``product ==
+    "equity"`` the underlying symbol is used directly.
+    """
     if not live:
         return {"submitted": False, "reason": "offline mode (no --live)"}
     if product == "none":
         return {"submitted": False, "reason": "product gate returned no-trade"}
     try:
-        from investment_agent.execution.execution import place_order
-        side = action.lower()
-        order = place_order(symbol=symbol, side=side, qty=int(quantity))
-        return {"submitted": True, "order": order}
+        from investment_agent.execution.execution import (
+            place_order, get_option_contract,
+        )
+        if product == "option":
+            contract = get_option_contract(
+                symbol, option_type=option_side,
+            )
+            order = place_order(
+                symbol=contract.symbol,
+                side=action.lower(),
+                qty=max(1, int(quantity)),
+                price_per_contract=float(contract.close_price or 0.0),
+            )
+            return {
+                "submitted": True,
+                "order": order,
+                "product": "option",
+                "option_symbol": contract.symbol,
+                "option_side": option_side,
+            }
+        # equity
+        order = place_order(
+            symbol=symbol, side=action.lower(),
+            qty=int(quantity) if quantity > 0 else 0,
+            price_per_contract=0.0,
+        )
+        return {"submitted": True, "order": order, "product": "equity"}
     except Exception as e:
-        return {"submitted": False, "error": str(e)}
+        return {"submitted": False, "error": str(e), "product": product}
 
 
 def main() -> int:
@@ -290,6 +325,7 @@ def main() -> int:
         product=pg_result.product, symbol=args.symbol,
         action=experience.position_action, quantity=experience.quantity,
         live=args.live and is_live,
+        option_side=pg_result.option_side,
     )
     print(f"[8] Execution: {json.dumps(result, default=str)}")
     return 0
