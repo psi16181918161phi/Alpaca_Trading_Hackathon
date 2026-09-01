@@ -20,10 +20,16 @@ HOW
 - ``FeatherlessOrchestrator`` wraps a list of ``FeatherlessProvider``
   instances plus a shared ``UsageLog``.
 - ``complete_with_failover(prompt, ...)`` tries providers in order, applying
-  a timeout per call and ``retries_per_provider`` retries. On success it
+  a timeout per call and ``retries_per_provider`` attempts. On success it
   returns ``(LLMResponse, provider_id)``.
 - The reserve provider is only consulted if every active provider fails
   AND ``use_reserve_on_failure=True``.
+- Failure classification: ``classify_failure()`` tags each error as
+  ``skip`` (no retry, e.g. HTTP 400 model unavailable), ``backoff``
+  (transient, e.g. capacity_exhausted, 5xx, timeout) or ``schema``
+  (non-retryable, e.g. malformed JSON). The retry loop honours the
+  classification so we never burn tokens on a model that's not on
+  the account.
 """
 
 from __future__ import annotations
@@ -33,10 +39,75 @@ import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
+import requests
+
 from .base import FeatherlessProvider, LLMProvider, LLMResponse
+
+
+# ---------------------------------------------------------------------------
+# Failure classification
+# ---------------------------------------------------------------------------
+
+class FailureKind(str, Enum):
+    """Classification of a provider error."""
+
+    SKIP = "skip"          # do NOT retry; move to next provider (e.g. HTTP 400)
+    BACKOFF = "backoff"    # transient; short pause then retry / failover
+    SCHEMA = "schema"      # non-retryable; response was malformed
+    NETWORK = "network"    # transport issue; retry / failover
+    UNKNOWN = "unknown"    # unknown; treat as backoff
+
+
+def classify_failure(exc: BaseException, response_body: Optional[Any] = None) -> FailureKind:
+    """Classify an exception (and optional response body) into a FailureKind.
+
+    Rules:
+        - HTTP 400, ``model_unavailable``, ``invalid_request_error``  -> SKIP
+        - HTTP 429, ``capacity_exhausted``, ``rate_limit_exceeded``  -> BACKOFF
+        - HTTP 5xx                                                     -> BACKOFF
+        - ``requests.exceptions.Timeout``                              -> BACKOFF
+        - ``requests.exceptions.ConnectionError``                      -> NETWORK
+        - Response body returned but JSON did not contain a JSON object -> SCHEMA
+    """
+    # Inspect response body first.
+    if isinstance(response_body, dict):
+        err = response_body.get("error") or {}
+        code = (err.get("code") or "").lower() if isinstance(err, dict) else ""
+        msg = (err.get("message") or "").lower() if isinstance(err, dict) else ""
+        if code in ("capacity_exhausted", "rate_limit_exceeded", "temporarily_unavailable"):
+            return FailureKind.BACKOFF
+        if code in ("model_unavailable", "invalid_request_error", "model_not_found"):
+            return FailureKind.SKIP
+        if "temporarily at capacity" in msg or "rate limit" in msg:
+            return FailureKind.BACKOFF
+        if "is temporarily at capacity" in msg or "not found" in msg:
+            return FailureKind.SKIP
+
+    # Inspect the exception.
+    if isinstance(exc, requests.exceptions.HTTPError):
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        if status == 400:
+            return FailureKind.SKIP
+        if status in (401, 403):
+            return FailureKind.SKIP  # auth problems won't fix themselves
+        if status == 429:
+            return FailureKind.BACKOFF
+        if status and 500 <= status < 600:
+            return FailureKind.BACKOFF
+        return FailureKind.UNKNOWN
+    if isinstance(exc, (requests.exceptions.Timeout, requests.exceptions.ReadTimeout)):
+        return FailureKind.BACKOFF
+    if isinstance(exc, requests.exceptions.ConnectionError):
+        return FailureKind.NETWORK
+    if isinstance(exc, json.JSONDecodeError):
+        return FailureKind.SCHEMA
+    if isinstance(exc, ValueError) and "no JSON" in str(exc):
+        return FailureKind.SCHEMA
+    return FailureKind.UNKNOWN
 
 
 # ---------------------------------------------------------------------------
@@ -147,9 +218,10 @@ class FeatherlessOrchestrator:
         *,
         base_url: str = FeatherlessProvider.DEFAULT_BASE_URL,
         timeout_s: float = 30.0,
-        retries_per_provider: int = 1,
+        retries_per_provider: int = 2,
         use_reserve_on_failure: bool = True,
         usage_log: Optional[UsageLog] = None,
+        backoff_s: float = 1.5,
     ) -> None:
         if not specs:
             raise ValueError("specs must be non-empty")
@@ -158,6 +230,7 @@ class FeatherlessOrchestrator:
         self._timeout_s = float(timeout_s)
         self._retries_per_provider = max(1, int(retries_per_provider))
         self._use_reserve_on_failure = bool(use_reserve_on_failure)
+        self._backoff_s = float(backoff_s)
         self._usage = usage_log or UsageLog()
 
         self._providers: Dict[str, FeatherlessProvider] = {}
@@ -235,6 +308,7 @@ class FeatherlessOrchestrator:
                 except Exception as exc:
                     last_error = exc
                     latency_ms = (time.perf_counter() - start) * 1000.0
+                    kind = classify_failure(exc)
                     self._usage.record(
                         provider_id=pid,
                         model=spec.model,
@@ -242,8 +316,14 @@ class FeatherlessOrchestrator:
                         latency_ms=latency_ms,
                         prompt_tokens=0,
                         completion_tokens=0,
-                        error=str(exc),
+                        error=f"{kind.value}: {exc!r}",
                     )
+                    # SKIP / SCHEMA: never retry this provider, move on.
+                    if kind in (FailureKind.SKIP, FailureKind.SCHEMA):
+                        break
+                    # BACKOFF: short pause before retry.
+                    if kind == FailureKind.BACKOFF and self._backoff_s > 0:
+                        time.sleep(self._backoff_s)
         raise RuntimeError(
             f"FeatherlessOrchestrator: all providers failed "
             f"(order={order}, last_error={last_error!r})"

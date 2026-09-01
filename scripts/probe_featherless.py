@@ -50,6 +50,7 @@ from investment_agent.llm import (
     ProviderSpec,
     UsageLog,
     build_named_specialists,
+    build_provider_map_from_orchestrator,
     build_snapshot,
     pre_screen,
     run_named_specialists,
@@ -108,7 +109,8 @@ def main() -> int:
             print(f"[FAIL] {pid}: {exc!r}")
 
     print("\n--- named specialists end-to-end ---")
-    specialists = build_named_specialists(orch)
+    provider_map = build_provider_map_from_orchestrator(orch)
+    specialists = build_named_specialists(provider_map)
     outputs = run_named_specialists(specialists, snapshot)
     for aid, out in outputs.items():
         print(f"  {aid}: s={out.s:+.3f} c={out.c:.3f} u={out.u:.3f} d={out.d:.3f}")

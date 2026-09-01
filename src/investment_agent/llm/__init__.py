@@ -24,20 +24,23 @@ from .base import (
 from .adapter import AgentLLMAdapter, extract_json_object
 from .orchestrator import (
     FeatherlessOrchestrator,
+    FailureKind,
     ProviderSpec,
     UsageLog,
     UsageRecord,
+    classify_failure,
     load_provider_specs,
 )
 from .snapshot import build_snapshot, pre_screen, PreScreenResult
 from .named import (
-    DEEPHERMES_ROLE,
-    FUNDAMENTALS_ROLE,
+    DEEPHERMES_FUNDAMENTALS_ROLE,
+    DEEPHERMES_REASONING_ROLE,
     FINANCE_QLORA_ROLE,
-    EXECUTION_ROLE,
     NAMED_ROLES,
     NamedSpecialist,
+    SpecialistOutput,
     build_named_specialists,
+    build_provider_map_from_orchestrator,
     run_named_specialists,
 )
 __all__ = [
@@ -51,21 +54,24 @@ __all__ = [
     "extract_json_object",
     # orchestrator
     "FeatherlessOrchestrator",
+    "FailureKind",
     "ProviderSpec",
     "UsageLog",
     "UsageRecord",
+    "classify_failure",
     "load_provider_specs",
     # snapshot
     "build_snapshot",
     "pre_screen",
     "PreScreenResult",
     # named specialists
-    "DEEPHERMES_ROLE",
-    "FUNDAMENTALS_ROLE",
+    "DEEPHERMES_REASONING_ROLE",
+    "DEEPHERMES_FUNDAMENTALS_ROLE",
     "FINANCE_QLORA_ROLE",
-    "EXECUTION_ROLE",
     "NAMED_ROLES",
     "NamedSpecialist",
+    "SpecialistOutput",
     "build_named_specialists",
+    "build_provider_map_from_orchestrator",
     "run_named_specialists",
 ]

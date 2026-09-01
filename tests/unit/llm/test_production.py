@@ -12,19 +12,23 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", "sr
 
 from investment_agent.llm import (
     AgentLLMAdapter,
-    DEEPHERMES_ROLE,
-    EXECUTION_ROLE,
+    DEEPHERMES_FUNDAMENTALS_ROLE,
+    DEEPHERMES_REASONING_ROLE,
+    FailureKind,
     FeatherlessOrchestrator,
-    FUNDAMENTALS_ROLE,
+    FINANCE_QLORA_ROLE,
     LLMResponse,
     MockLLMProvider,
     NAMED_ROLES,
     NamedSpecialist,
     PreScreenResult,
     ProviderSpec,
+    SpecialistOutput,
     UsageLog,
     build_named_specialists,
+    build_provider_map_from_orchestrator,
     build_snapshot,
+    classify_failure,
     extract_json_object,
     load_provider_specs,
     pre_screen,
@@ -234,6 +238,18 @@ class TestFeatherlessOrchestrator(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestNamedSpecialists(unittest.TestCase):
+    def setUp(self):
+        # Three independent providers, one per specialist. This is the
+        # production binding the audit required.
+        self.reasoning = MockLLMProvider(model_id="deephermes-3-8b")
+        self.fundamentals = MockLLMProvider(model_id="deephermes-fundamentals")
+        self.finance_qlora = MockLLMProvider(model_id="finance-qlora")
+        self.provider_map = {
+            "agent_deephermes_reasoning": self.reasoning,
+            "agent_deephermes_fundamentals": self.fundamentals,
+            "agent_finance_qlora": self.finance_qlora,
+        }
+
     def test_three_roles_defined(self):
         ids = {r.agent_id for r in NAMED_ROLES}
         self.assertEqual(
@@ -242,51 +258,104 @@ class TestNamedSpecialists(unittest.TestCase):
                 "agent_deephermes_reasoning",
                 "agent_deephermes_fundamentals",
                 "agent_finance_qlora",
-                "agent_deephermes_execution",
             },
         )
+        self.assertNotIn("agent_deephermes_execution", ids)
+        self.assertNotIn("agent_finance_llama", ids)
+        self.assertNotIn("agent_qwen_trading", ids)
 
     def test_each_role_has_capped_signal(self):
         for role in NAMED_ROLES:
             self.assertIn("Cap absolute signal", role.system_prompt)
 
+    def test_no_rationale_in_noise_field(self):
+        """noise is a quantitative channel; the prompt must not ask the LLM
+        to stuff rationale into it.
+        """
+        for role in NAMED_ROLES:
+            self.assertNotIn("'noise' field", role.user_template)
+            self.assertNotIn("noise field", role.user_template.lower())
+
     def test_build_named_specialists(self):
-        provider = MockLLMProvider()
-        specialists = build_named_specialists(provider)
-        self.assertEqual(len(specialists), 4)
+        specialists = build_named_specialists(self.provider_map)
+        self.assertEqual(len(specialists), 3)
         for name, sp in specialists.items():
             self.assertIsInstance(sp, NamedSpecialist)
             self.assertGreater(sp.max_tokens, 0)
+            self.assertLessEqual(sp.max_tokens, 256)  # reduced budget
 
-    def test_run_named_specialists_returns_three_outputs(self):
-        provider = MockLLMProvider(
-            responder=lambda sys, prompt: json.dumps({
-                "signal": 0.4, "confidence": 0.8, "uncertainty": 0.2,
-                "doubt": 0.1, "p_plus": 0.6, "p_minus": 0.3,
-                "delta_t": 1.0, "noise": 0.3,
-            })
-        )
-        specialists = build_named_specialists(provider)
+    def test_specialist_bound_to_its_provider(self):
+        """Each specialist must use the provider mapped to it, not a shared one."""
+        specialists = build_named_specialists(self.provider_map)
+        self.assertIs(specialists["agent_deephermes_reasoning"].provider, self.reasoning)
+        self.assertIs(specialists["agent_deephermes_fundamentals"].provider, self.fundamentals)
+        self.assertIs(specialists["agent_finance_qlora"].provider, self.finance_qlora)
+
+    def test_missing_provider_raises(self):
+        bad_map = {"agent_deephermes_reasoning": self.reasoning}
+        with self.assertRaises(ValueError):
+            build_named_specialists(bad_map)
+
+    def test_run_named_specialists_routes_to_correct_providers(self):
+        # Each provider records which specialist it was called for.
+        calls: List[str] = []
+        def make_recording(name):
+            def responder(sys, prompt):
+                calls.append(name)
+                return json.dumps({
+                    "signal": 0.4, "confidence": 0.8, "uncertainty": 0.2,
+                    "doubt": 0.1, "p_plus": 0.6, "p_minus": 0.3,
+                    "delta_t": 1.0, "noise": 0.3,
+                })
+            return responder
+        self.reasoning._responder = make_recording("reasoning")
+        self.fundamentals._responder = make_recording("fundamentals")
+        self.finance_qlora._responder = make_recording("finance_qlora")
+
+        specialists = build_named_specialists(self.provider_map)
         snap = build_snapshot("AAPL", [100, 100.5, 101], regime="R01")
         outputs = run_named_specialists(specialists, snap)
-        self.assertEqual(len(outputs), 4)
+
+        self.assertEqual(set(outputs.keys()),
+                         {"agent_deephermes_reasoning", "agent_deephermes_fundamentals", "agent_finance_qlora"})
         for aid, out in outputs.items():
             self.assertIsInstance(out, AgentOutput)
             self.assertEqual(out.agent_id, aid)
+        # Each specialist called exactly one provider.
+        self.assertEqual(calls, ["reasoning", "fundamentals", "finance_qlora"])
+        # And the per-provider call counts prove no cross-talk.
+        self.assertEqual(self.reasoning.call_count, 1)
+        self.assertEqual(self.fundamentals.call_count, 1)
+        self.assertEqual(self.finance_qlora.call_count, 1)
+
+    def test_specialist_run_returns_specialist_output(self):
+        """SpecialistOutput carries AgentOutput + rationale + raw_text."""
+        specialists = build_named_specialists(self.provider_map)
+        snap = build_snapshot("AAPL", [100, 100.5, 101], regime="R01")
+        result = specialists["agent_deephermes_reasoning"].run(snap)
+        self.assertIsInstance(result, SpecialistOutput)
+        self.assertIsInstance(result.output, AgentOutput)
+        self.assertEqual(result.output.agent_id, "agent_deephermes_reasoning")
+        self.assertIsInstance(result.raw_text, str)
 
     def test_prompt_contains_compact_snapshot(self):
-        captured: List[str] = []
-        provider = MockLLMProvider(responder=lambda sys, prompt: (
-            captured.append(prompt) or json.dumps({"signal": 0.0, "confidence": 0.5})
-        ))
-        specialists = build_named_specialists(provider)
+        captured: Dict[str, str] = {}
+        def responder(sys, prompt):
+            return json.dumps({
+                "signal": 0.2, "confidence": 0.6, "uncertainty": 0.3,
+                "doubt": 0.2, "p_plus": 0.5, "p_minus": 0.4,
+                "delta_t": 1.0, "noise": 0.4,
+            })
+        self.reasoning._responder = lambda s, p: (captured.setdefault("r", p), responder(s, p))[1]
+        self.fundamentals._responder = lambda s, p: (captured.setdefault("f", p), responder(s, p))[1]
+        self.finance_qlora._responder = lambda s, p: (captured.setdefault("q", p), responder(s, p))[1]
+        specialists = build_named_specialists(self.provider_map)
         snap = build_snapshot("AAPL", [100, 100.5, 101], regime="R01")
         run_named_specialists(specialists, snap)
-        self.assertEqual(len(captured), 4)
-        for p in captured:
-            self.assertIn("Snapshot", p)
-            self.assertIn("AAPL", p)
-            self.assertIn("return_1d", p)
+        for prompt in captured.values():
+            self.assertIn("Snapshot", prompt)
+            self.assertIn("AAPL", prompt)
+            self.assertIn("return_1d", prompt)
 
     def test_provider_failure_yields_fallback(self):
         class BoomProvider:
@@ -295,12 +364,82 @@ class TestNamedSpecialists(unittest.TestCase):
                 return "boom"
             def complete(self, *args, **kwargs):
                 raise RuntimeError("simulated outage")
-        specialists = build_named_specialists(BoomProvider())
+        bad_map = {
+            "agent_deephermes_reasoning": BoomProvider(),
+            "agent_deephermes_fundamentals": BoomProvider(),
+            "agent_finance_qlora": BoomProvider(),
+        }
+        specialists = build_named_specialists(bad_map)
         snap = build_snapshot("AAPL", [100, 100.5, 101], regime="R01")
         outputs = run_named_specialists(specialists, snap)
         for out in outputs.values():
             self.assertEqual(out.s, 0.0)
             self.assertEqual(out.c, 0.25)
+
+
+# ---------------------------------------------------------------------------
+# Failure classification
+# ---------------------------------------------------------------------------
+
+class TestFailureClassification(unittest.TestCase):
+    def test_http_400_is_skip(self):
+        import requests as _r
+        response = _r.Response()
+        response.status_code = 400
+        exc = _r.HTTPError("bad request", response=response)
+        self.assertEqual(classify_failure(exc), FailureKind.SKIP)
+
+    def test_capacity_exhausted_body_is_backoff(self):
+        body = {"error": {"code": "capacity_exhausted", "message": "temporarily at capacity"}}
+        self.assertEqual(
+            classify_failure(RuntimeError("x"), response_body=body),
+            FailureKind.BACKOFF,
+        )
+
+    def test_model_not_found_body_is_skip(self):
+        body = {"error": {"code": "model_not_found", "message": "model not found"}}
+        self.assertEqual(
+            classify_failure(RuntimeError("x"), response_body=body),
+            FailureKind.SKIP,
+        )
+
+    def test_timeout_is_backoff(self):
+        import requests as _r
+        exc = _r.exceptions.Timeout("read timeout")
+        self.assertEqual(classify_failure(exc), FailureKind.BACKOFF)
+
+    def test_connection_error_is_network(self):
+        import requests as _r
+        exc = _r.exceptions.ConnectionError("dns")
+        self.assertEqual(classify_failure(exc), FailureKind.NETWORK)
+
+
+# ---------------------------------------------------------------------------
+# build_provider_map_from_orchestrator
+# ---------------------------------------------------------------------------
+
+class TestBuildProviderMapFromOrchestrator(unittest.TestCase):
+    def test_default_mapping(self):
+        orch = FeatherlessOrchestrator([
+            ProviderSpec("deephermes", "k1", "m1", 0.15, 700, "default"),
+            ProviderSpec("fundamentals", "k2", "m2", 0.15, 700, "default"),
+            ProviderSpec("finance_qlora", "k3", "m3", 0.15, 700, "default"),
+        ])
+        provider_map = build_provider_map_from_orchestrator(orch)
+        self.assertEqual(
+            set(provider_map.keys()),
+            {"agent_deephermes_reasoning", "agent_deephermes_fundamentals", "agent_finance_qlora"},
+        )
+        self.assertIs(provider_map["agent_deephermes_reasoning"], orch._providers["deephermes"])
+        self.assertIs(provider_map["agent_deephermes_fundamentals"], orch._providers["fundamentals"])
+        self.assertIs(provider_map["agent_finance_qlora"], orch._providers["finance_qlora"])
+
+    def test_missing_provider_id_raises(self):
+        orch = FeatherlessOrchestrator([
+            ProviderSpec("deephermes", "k1", "m1", 0.15, 700, "default"),
+        ])
+        with self.assertRaises(ValueError):
+            build_provider_map_from_orchestrator(orch)
 
 
 # ---------------------------------------------------------------------------
