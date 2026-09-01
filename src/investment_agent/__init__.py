@@ -49,6 +49,52 @@ _public_api["AgentReputationTracker"] = (
     "investment_agent.agents.agent_reputation",
     "AgentReputationTracker",
 )
+_public_api["SpecialistAgent"] = (
+    "investment_agent.agents.specialist",
+    "SpecialistAgent",
+)
+_public_api["AgentRole"] = (
+    "investment_agent.agents.specialist",
+    "AgentRole",
+)
+_public_api["AgentContext"] = (
+    "investment_agent.agents.specialist",
+    "AgentContext",
+)
+_public_api["DEFAULT_ROLES"] = (
+    "investment_agent.agents.specialist",
+    "DEFAULT_ROLES",
+)
+_public_api["build_specialist_agents"] = (
+    "investment_agent.agents.specialist",
+    "build_specialist_agents",
+)
+_public_api["run_agents"] = (
+    "investment_agent.agents.specialist",
+    "run_agents",
+)
+
+# llm
+_public_api["LLMProvider"] = (
+    "investment_agent.llm",
+    "LLMProvider",
+)
+_public_api["LLMResponse"] = (
+    "investment_agent.llm",
+    "LLMResponse",
+)
+_public_api["MockLLMProvider"] = (
+    "investment_agent.llm",
+    "MockLLMProvider",
+)
+_public_api["FeatherlessProvider"] = (
+    "investment_agent.llm",
+    "FeatherlessProvider",
+)
+_public_api["AgentLLMAdapter"] = (
+    "investment_agent.llm",
+    "AgentLLMAdapter",
+)
 
 # capital
 _public_api["CapitalGateResult"] = (

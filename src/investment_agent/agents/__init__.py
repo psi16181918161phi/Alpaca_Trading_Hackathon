@@ -49,5 +49,29 @@ _public_api["AgentReputationTracker"] = (
     "investment_agent.agents.agent_reputation",
     "AgentReputationTracker",
 )
+_public_api["SpecialistAgent"] = (
+    "investment_agent.agents.specialist",
+    "SpecialistAgent",
+)
+_public_api["AgentRole"] = (
+    "investment_agent.agents.specialist",
+    "AgentRole",
+)
+_public_api["AgentContext"] = (
+    "investment_agent.agents.specialist",
+    "AgentContext",
+)
+_public_api["DEFAULT_ROLES"] = (
+    "investment_agent.agents.specialist",
+    "DEFAULT_ROLES",
+)
+_public_api["build_specialist_agents"] = (
+    "investment_agent.agents.specialist",
+    "build_specialist_agents",
+)
+_public_api["run_agents"] = (
+    "investment_agent.agents.specialist",
+    "run_agents",
+)
 
 __all__ = list(_public_api.keys())
