@@ -34,10 +34,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from ..llm.adapter import AgentLLMAdapter
-from ..llm.base import LLMProvider
 from ..signals.ensemble_signal import AgentOutput
-from ..memory.trade_memory import TradeMemory, SimilarExperience
+from ..memory.trade_memory import TradeMemory, SimilarExperience  # noqa: F401
+
+# AgentLLMAdapter and LLMProvider are imported lazily inside
+# ``build_specialist_agents`` to break the historical circular import:
+# ``llm/__init__.py`` re-exports ``named.py`` which in turn imports
+# ``AgentRole`` from this module. Eagerly importing ``from ..llm...``
+# at module load triggers the cycle.
 
 
 # ---------------------------------------------------------------------------
@@ -335,13 +339,14 @@ class SpecialistAgent:
 # ---------------------------------------------------------------------------
 
 def build_specialist_agents(
-    provider: LLMProvider,
+    provider: "LLMProvider",
     *,
     roles: Sequence[AgentRole] = DEFAULT_ROLES,
     fallback_signal: float = 0.0,
     fallback_confidence: float = 0.25,
 ) -> Dict[str, SpecialistAgent]:
     """Build the seven (or more) specialist agents for one provider."""
+    from ..llm.adapter import AgentLLMAdapter  # lazy: breaks circular import
     agents: Dict[str, SpecialistAgent] = {}
     for role in roles:
         adapter = AgentLLMAdapter(
