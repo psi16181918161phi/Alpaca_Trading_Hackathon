@@ -447,3 +447,284 @@ def build_order_history_table(orders: List[Dict[str, Any]], session_id: str = "n
     ))
     fig.update_layout(**_base_layout("Order History", showlegend=False))
     return _source_annotation(fig, session_id, mode)
+
+
+# ---------------------------------------------------------------------------
+# Control-room panel builders (single scrolling layout, no P01-P06 tabs)
+# ---------------------------------------------------------------------------
+
+def build_seven_state_soc_chart(charges: List[Dict[str, Any]], session_id: str = "n/a", mode: str = "PAPER") -> go.Figure:
+    """Horizontal bar chart of the seven state-of-charge values in [0, 1]."""
+    if not charges:
+        return _empty_figure("No state-of-charge data yet")
+    labels = [c.get("label", "?") for c in charges]
+    values = [float(c.get("value", 0.0) or 0.0) for c in charges]
+    bar_colors = [
+        colors.SERIES_LONG if v >= 0.66 else colors.ALERT_WARN if v >= 0.33 else colors.ALERT_CRITICAL
+        for v in values
+    ]
+    fig = go.Figure(go.Bar(
+        x=values, y=labels, orientation="h",
+        marker=dict(color=bar_colors),
+        text=[f"{v:.2f}" for v in values], textposition="outside",
+        textfont=dict(family=colors.FONT_MONO, size=11, color=colors.TEXT_PRIMARY),
+    ))
+    fig.update_layout(**_base_layout(
+        "7-State Capital Gate: State-of-Charge",
+        xaxis_title="Charge", yaxis_title="State",
+        xaxis=dict(range=[0, 1.15]),
+        showlegend=False,
+    ))
+    return _source_annotation(fig, session_id, mode)
+
+
+def build_seven_agents_table(agents: List[Dict[str, Any]], session_id: str = "n/a", mode: str = "PAPER") -> go.Figure:
+    """Per-agent signal / confidence / weight / status table for the latest cycle."""
+    if not agents:
+        return _empty_figure("No agent signals yet")
+    rows = agents
+    row_colors = [
+        colors.SERIES_LONG if r.get("signal", 0.0) >= 0 else colors.REGIME_BEAR
+        for r in rows
+    ]
+    text_colors = [_contrasting_text(c) for c in row_colors]
+    fig = go.Figure(go.Table(
+        columnwidth=[220, 90, 100, 90, 110],
+        header=dict(
+            values=["Agent", "Signal", "Confidence", "Weight", "Status"],
+            fill_color=colors.BACKGROUND_SECONDARY, font=_table_header_font(),
+            align="left", height=28,
+        ),
+        cells=dict(
+            values=[
+                [r.get("agent_id", "") for r in rows],
+                [f"{r.get('signal', 0.0):+.2f}" for r in rows],
+                [f"{r.get('confidence', 0.0):.2f}" for r in rows],
+                [f"{r.get('weight', 0.0):.2f}" for r in rows],
+                [r.get("status", "ok") for r in rows],
+            ],
+            fill_color=[row_colors],
+            font=_table_cell_font(text_colors),
+            align="left", height=26,
+        ),
+    ))
+    fig.update_layout(**_base_layout("7 Specialist Agents (latest cycle)", showlegend=False))
+    return _source_annotation(fig, session_id, mode)
+
+
+def build_kalman_chart(kalman: Dict[str, Any], session_id: str = "n/a", mode: str = "PAPER") -> go.Figure:
+    """Bar chart of prior / observation / posterior with the gain as a gauge."""
+    if not kalman:
+        return _empty_figure("No Kalman data yet")
+    kg = float(kalman.get("kalman_gain", 0.0) or 0.0)
+    prior = float(kalman.get("prior_confidence", 0.0) or 0.0)
+    obs = float(kalman.get("market_observation", 0.0) or 0.0)
+    posterior = float(kalman.get("posterior_estimate", 0.0) or 0.0)
+    cats = ["Prior", "Observation", "Posterior"]
+    vals = [prior, obs, posterior]
+    bar_colors = [colors.SERIES_BENCHMARK, colors.SERIES_EQUITY, colors.SERIES_LONG]
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=cats, y=vals, marker=dict(color=bar_colors),
+        text=[f"{v:+.2f}" for v in vals], textposition="outside",
+        textfont=dict(family=colors.FONT_MONO, size=11, color=colors.TEXT_PRIMARY),
+    ))
+    fig.add_annotation(
+        text=f"K = {kg:.2f}",
+        xref="paper", yref="paper", x=0.5, y=1.18,
+        showarrow=False,
+        font=dict(family=colors.FONT_MONO, size=14, color=colors.TEXT_PRIMARY),
+    )
+    fig.update_layout(**_base_layout(
+        "Investment Kalman: prior → posterior",
+        yaxis_title="Belief",
+        yaxis=dict(range=[-1, 1]),
+        showlegend=False,
+    ))
+    return _source_annotation(fig, session_id, mode)
+
+
+def build_regime_panel_chart(regime_card: Dict[str, Any], session_id: str = "n/a", mode: str = "PAPER") -> go.Figure:
+    """Current-regime probability bar chart."""
+    if not regime_card or not regime_card.get("regime"):
+        return _empty_figure("No regime data yet")
+    probs = regime_card.get("probabilities", {}) or {}
+    if not probs:
+        return _empty_figure("No regime data yet")
+    regimes = sorted(probs.keys())
+    values = [float(probs.get(r, 0.0) or 0.0) for r in regimes]
+    bar_colors = [colors.REGIME_COLORS.get(r, colors.REGIME_NEUTRAL) for r in regimes]
+    fig = go.Figure(go.Bar(
+        x=values, y=regimes, orientation="h",
+        marker=dict(color=bar_colors),
+        text=[f"{v:.1%}" for v in values], textposition="outside",
+        textfont=dict(family=colors.FONT_MONO, size=11, color=colors.TEXT_PRIMARY),
+    ))
+    fig.update_layout(**_base_layout(
+        f"Current Regime: {regime_card.get('regime', 'n/a')} "
+        f"(top prob {regime_card.get('top_probability', 0.0):.1%})",
+        xaxis_title="Probability", yaxis_title="Regime",
+        xaxis=dict(range=[0, 1.15]),
+        showlegend=False,
+    ))
+    return _source_annotation(fig, session_id, mode)
+
+
+def build_llm_providers_table(rows: List[Dict[str, Any]], session_id: str = "n/a", mode: str = "PAPER") -> go.Figure:
+    """Per-provider health table: status, model, latency, tokens, success/fail counts."""
+    if not rows:
+        return _empty_figure("No LLM calls recorded yet")
+    ordered = sorted(rows, key=lambda r: r.get("provider_id", ""))
+    row_colors = [
+        colors.SERIES_LONG if r.get("last_status") == "ok" else colors.ALERT_WARN
+        for r in ordered
+    ]
+    text_colors = [_contrasting_text(c) for c in row_colors]
+    fig = go.Figure(go.Table(
+        columnwidth=[140, 220, 90, 110, 110, 80, 80],
+        header=dict(
+            values=["Provider", "Model", "Status", "Last latency", "Last tokens", "Success", "Fail"],
+            fill_color=colors.BACKGROUND_SECONDARY, font=_table_header_font(),
+            align="left", height=28,
+        ),
+        cells=dict(
+            values=[
+                [r.get("provider_id", "") for r in ordered],
+                [(r.get("model", "") or "")[:48] for r in ordered],
+                [r.get("last_status", "ok") for r in ordered],
+                [f"{r.get('last_latency_ms', 0.0):.0f} ms" for r in ordered],
+                [str(r.get("last_tokens", 0)) for r in ordered],
+                [str(r.get("success_calls", 0)) for r in ordered],
+                [str(r.get("failure_calls", 0)) for r in ordered],
+            ],
+            fill_color=[row_colors],
+            font=_table_cell_font(text_colors),
+            align="left", height=26,
+        ),
+    ))
+    fig.update_layout(**_base_layout("LLM Providers (Featherless, last call per provider)", showlegend=False))
+    return _source_annotation(fig, session_id, mode)
+
+
+def build_options_table(contracts: List[Dict[str, Any]], session_id: str = "n/a", mode: str = "PAPER") -> go.Figure:
+    """Options activity table. Empty when no options are recorded."""
+    if not contracts:
+        return _empty_figure("No options activity yet")
+    fig = go.Figure(go.Table(
+        header=dict(
+            values=["Underlying", "Contract", "Side", "Status"],
+            fill_color=colors.BACKGROUND_SECONDARY, font=_table_header_font(),
+            align="left", height=28,
+        ),
+        cells=dict(
+            values=[
+                [c.get("underlying", "") for c in contracts],
+                [c.get("symbol", "") for c in contracts],
+                [c.get("side", "") for c in contracts],
+                [c.get("status", "") for c in contracts],
+            ],
+            fill_color=[[colors.BACKGROUND_CARD] * len(contracts)],
+            font=_table_cell_font([colors.TEXT_PRIMARY] * len(contracts)),
+            align="left", height=26,
+        ),
+    ))
+    fig.update_layout(**_base_layout("Options Activity", showlegend=False))
+    return _source_annotation(fig, session_id, mode)
+
+
+def build_trade_outcome_table(rows: List[Dict[str, Any]], session_id: str = "n/a", mode: str = "PAPER") -> go.Figure:
+    """Per-agent accuracy table for the last N closed trades."""
+    if not rows:
+        return _empty_figure("No closed trades yet")
+    ordered = sorted(rows, key=lambda r: r.get("agent_id", ""))
+    row_colors = [
+        colors.SERIES_LONG if r.get("accuracy", 0.0) >= 0.66 else
+        colors.ALERT_WARN if r.get("accuracy", 0.0) >= 0.5 else
+        colors.REGIME_BEAR
+        for r in ordered
+    ]
+    text_colors = [_contrasting_text(c) for c in row_colors]
+    fig = go.Figure(go.Table(
+        columnwidth=[200, 90, 100, 100],
+        header=dict(
+            values=["Agent", "Correct", "Incorrect", "Accuracy"],
+            fill_color=colors.BACKGROUND_SECONDARY, font=_table_header_font(),
+            align="left", height=28,
+        ),
+        cells=dict(
+            values=[
+                [r.get("agent_id", "") for r in ordered],
+                [str(r.get("correct", 0)) for r in ordered],
+                [str(r.get("incorrect", 0)) for r in ordered],
+                [f"{r.get('accuracy', 0.0):.1%}" for r in ordered],
+            ],
+            fill_color=[row_colors],
+            font=_table_cell_font(text_colors),
+            align="left", height=26,
+        ),
+    ))
+    fig.update_layout(**_base_layout("Trade Outcome Learning (last 50 closed trades)", showlegend=False))
+    return _source_annotation(fig, session_id, mode)
+
+
+def build_reputation_table(rows: List[Dict[str, Any]], session_id: str = "n/a", mode: str = "PAPER") -> go.Figure:
+    """Per-agent Beta(α, β) reputation table."""
+    if not rows:
+        return _empty_figure("No reputation data yet")
+    ordered = sorted(rows, key=lambda r: r.get("agent_id", ""))
+    fig = go.Figure(go.Table(
+        columnwidth=[220, 90, 90, 110, 110],
+        header=dict(
+            values=["Agent", "α", "β", "Weight", "Closed trades"],
+            fill_color=colors.BACKGROUND_SECONDARY, font=_table_header_font(),
+            align="left", height=28,
+        ),
+        cells=dict(
+            values=[
+                [r.get("agent_id", "") for r in ordered],
+                [f"{r.get('alpha', 1.0):.1f}" for r in ordered],
+                [f"{r.get('beta', 1.0):.1f}" for r in ordered],
+                [f"{r.get('weight', 0.5):.2f}" for r in ordered],
+                [str(r.get("closed_trades", 0)) for r in ordered],
+            ],
+            fill_color=[[colors.BACKGROUND_CARD] * len(ordered)],
+            font=_table_cell_font([colors.TEXT_PRIMARY] * len(ordered)),
+            align="left", height=26,
+        ),
+    ))
+    fig.update_layout(**_base_layout("Agent Reputation (Beta-Bernoulli priors)", showlegend=False))
+    return _source_annotation(fig, session_id, mode)
+
+
+def build_decision_waterfall(steps: List[Dict[str, Any]]) -> go.Figure:
+    """Vertical 'Why did X Quant X trade?' stepper rendered as a Plotly table."""
+    if not steps:
+        return _empty_figure("No decision recorded yet")
+    status_color = {
+        "pass": colors.SERIES_LONG,
+        "warn": colors.ALERT_WARN,
+        "fail": colors.ALERT_BADGE,
+        "info": colors.BACKGROUND_SECONDARY,
+    }
+    row_colors = [status_color.get(s.get("status", "info"), colors.BACKGROUND_CARD) for s in steps]
+    text_colors = [_contrasting_text(c) for c in row_colors]
+    fig = go.Figure(go.Table(
+        columnwidth=[60, 240, 220],
+        header=dict(
+            values=["#", "Stage", "Value"],
+            fill_color=colors.BACKGROUND_SECONDARY, font=_table_header_font(),
+            align="left", height=28,
+        ),
+        cells=dict(
+            values=[
+                [str(i + 1) for i, _ in enumerate(steps)],
+                [s.get("stage", "") for s in steps],
+                [s.get("value", "") for s in steps],
+            ],
+            fill_color=[row_colors],
+            font=_table_cell_font(text_colors),
+            align="left", height=26,
+        ),
+    ))
+    fig.update_layout(**_base_layout("Why did X Quant X trade? (one decision end-to-end)", showlegend=False))
+    return fig
