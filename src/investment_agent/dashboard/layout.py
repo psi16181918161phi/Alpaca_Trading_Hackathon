@@ -169,14 +169,15 @@ def session_control_panel(session_status, command_file="/tmp/session_command.jso
     """'X QUANT X — SESSION CONTROL' top-of-page panel.
 
     Reads the session status (state, cycle index, last decision, next
-    cycle) from a JSON file written by the SessionController. The
-    START / STOP / EMERGENCY STOP buttons write a command file that
+    cycle, session id) from a JSON file written by the SessionController.
+    The START / STOP / EMERGENCY STOP buttons write a command file that
     the long-running session process polls. The dashboard never
     imports the Alpaca TradingClient -- this matches the architecture
     rule that the dashboard is monitoring-only.
     """
     state = str(session_status.get("state", "STOPPED") or "STOPPED")
     stage = str(session_status.get("stage", "paper") or "paper")
+    session_id = str(session_status.get("session_id", "") or "")
     cycle_index = int(session_status.get("cycle_index", 0) or 0)
     last_decision = str(session_status.get("last_decision_summary", "") or "")
     last_cycle_at = str(session_status.get("last_cycle_at", "") or "")
@@ -273,6 +274,16 @@ def session_control_panel(session_status, command_file="/tmp/session_command.jso
                 children=[
                     _status_chip(f"MODE: {stage.upper()}", colors.SERIES_BENCHMARK),
                     _status_chip(state, state_bg),
+                    html.Span(
+                        f"SESSION: {session_id}" if session_id else "SESSION: (none)",
+                        style={
+                            "color": colors.TEXT_SECONDARY,
+                            "fontFamily": colors.FONT_MONO,
+                            "fontSize": "11px",
+                            "marginLeft": "16px",
+                            "letterSpacing": "0.5px",
+                        },
+                    ),
                     html.Span(
                         "● CONNECTED TO ALPACA" if state != "STOPPED" and state != "ERROR"
                         else "○ ALPACA LINK",
@@ -831,6 +842,7 @@ def build_stop_session_modal():
         id="stop-session-modal",
         message=(
             "This dashboard is monitoring-only and does not own the running "
-            "trading loop. To stop trading, stop the run_agent.py process."
+            "trading loop. To stop trading, stop the run_session.py process "
+            "or press the STOP button in the Session Control panel."
         ),
     )

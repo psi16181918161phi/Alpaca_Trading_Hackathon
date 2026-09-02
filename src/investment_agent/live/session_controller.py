@@ -49,6 +49,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
+import uuid
 
 
 logger = logging.getLogger(__name__)
@@ -78,6 +79,7 @@ DEFAULT_COMMAND_FILE = "session_command.json"
 @dataclass
 class SessionStatus:
     """Serializable session status that the dashboard reads."""
+    session_id: str = ""
     state: str = SessionState.STOPPED.value
     stage: str = "dry_run"
     started_at: Optional[str] = None
@@ -275,10 +277,13 @@ class SessionController:
             self._stop_requested.clear()
             self._emergency_stop.clear()
             self._start_params = dict(params or {})
+            sess_id = str(self._start_params.get("session_id") or f"session-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:6]}")
             self._update_status(
+                session_id=sess_id,
                 state=SessionState.STARTING.value,
                 started_at=datetime.now(timezone.utc).isoformat(),
                 last_error="",
+                last_decision_summary="",
                 cycle_index=0,
                 total_decisions=0,
                 total_orders=0,
@@ -331,6 +336,7 @@ class SessionController:
 
             interval = max(1, int(self._start_params.get("decision_interval_seconds", 300)))
             max_intervals = self._start_params.get("max_intervals")
+            cycles_run = 0
 
             while not self._stop_requested.is_set():
                 if self._emergency_stop.is_set():
@@ -344,7 +350,9 @@ class SessionController:
                     time.sleep(1)
                     continue
                 self._on_cycle_complete(report)
-                if max_intervals is not None and self._thread is None:
+                cycles_run += 1
+                if max_intervals is not None and cycles_run >= int(max_intervals):
+                    logger.info("session: reached max_intervals=%s", max_intervals)
                     break
                 # Sleep, but break out promptly on stop.
                 if self._stop_requested.wait(timeout=interval):
@@ -373,6 +381,11 @@ class SessionController:
                 last_error=str(exc),
                 stopped_at=datetime.now(timezone.utc).isoformat(),
             )
+        finally:
+            # Mark the thread reference as None so a subsequent start()
+            # sees a clean slate (idempotent restart).
+            with self._lock:
+                self._thread = None
 
     def _on_cycle_complete(self, report: Any) -> None:
         """Update the session status from a freshly-completed IntervalReport."""

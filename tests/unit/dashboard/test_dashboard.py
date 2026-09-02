@@ -1026,6 +1026,7 @@ class TestSessionControlPanel(unittest.TestCase):
         status = {
             "state": "RUNNING",
             "stage": "paper",
+            "session_id": "session-20260901-180707-a1b2c3",
             "cycle_index": 7,
             "last_decision_summary": "BUY AAPL (equity)",
             "last_cycle_at": "2026-09-01T16:34:38.207724+00:00",
@@ -1042,6 +1043,7 @@ class TestSessionControlPanel(unittest.TestCase):
         text = self._flatten_text(panel)
         self.assertIn("RUNNING", text)
         self.assertIn("PAPER", text)
+        self.assertIn("session-20260901-180707-a1b2c3", text)
         self.assertIn("#7", text)
         self.assertIn("BUY AAPL", text)
         self.assertIn("12", text)  # total_decisions

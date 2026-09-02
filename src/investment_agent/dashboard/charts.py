@@ -73,7 +73,7 @@ def _source_annotation(fig: go.Figure, session_id: str, mode: str) -> go.Figure:
     fig.add_annotation(
         text=f"X Quant X | {session_id} | {mode}",
         xref="paper", yref="paper",
-        x=1.0, y=-0.22,
+        x=1.0, y=-0.32,
         showarrow=False,
         font=dict(family=colors.FONT_SANS, color=colors.TEXT_SECONDARY, size=10),
         align="right",
@@ -82,7 +82,7 @@ def _source_annotation(fig: go.Figure, session_id: str, mode: str) -> go.Figure:
 
 
 def _table_header_font() -> dict:
-    return dict(family=colors.FONT_SANS, size=11, color=colors.TEXT_PRIMARY)
+    return dict(family=colors.FONT_SANS, size=10, color=colors.TEXT_PRIMARY)
 
 
 def _contrasting_text(bg_hex: str) -> str:
@@ -578,7 +578,7 @@ def build_seven_agents_table(agents: List[Dict[str, Any]], session_id: str = "n/
         return "—"
 
     fig = go.Figure(go.Table(
-        columnwidth=[170, 60, 70, 60, 60, 60, 60, 70, 60, 110],
+        columnwidth=[150, 65, 60, 60, 65, 65, 65, 55, 65, 100],
         header=dict(
             values=[
                 "Agent", "Signal", "Conf", "Unc", "Doubt",
@@ -602,7 +602,7 @@ def build_seven_agents_table(agents: List[Dict[str, Any]], session_id: str = "n/
             ],
             fill_color=[row_colors],
             font=_table_cell_font(text_colors),
-            align="left", height=26,
+            align="left", height=24,
         ),
     ))
     fig.update_layout(**_base_layout(
@@ -640,15 +640,9 @@ def build_kalman_chart(kalman: Dict[str, Any], session_id: str = "n/a", mode: st
         text=[f"{v:+.2f}" for v in vals], textposition="outside",
         textfont=dict(family=colors.FONT_MONO, size=11, color=colors.TEXT_PRIMARY),
     ))
-    fig.add_annotation(
-        text=f"K = {kg:.2f}",
-        xref="paper", yref="paper", x=0.5, y=1.18,
-        showarrow=False,
-        font=dict(family=colors.FONT_MONO, size=14, color=colors.TEXT_PRIMARY),
-    )
     pos_label = "authoritative (state-gated)" if is_authoritative else "reconstructed (legacy)"
     fig.update_layout(**_base_layout(
-        f"Investment Kalman: prior → posterior [{pos_label}]",
+        f"Investment Kalman: prior → posterior [{pos_label}] (K = {kg:.2f})",
         yaxis_title="Belief",
         yaxis=dict(range=[-1, 1]),
         showlegend=False,
@@ -692,8 +686,12 @@ def build_llm_providers_table(rows: List[Dict[str, Any]], session_id: str = "n/a
         for r in ordered
     ]
     text_colors = [_contrasting_text(c) for c in row_colors]
+    def _fmt_model(m: str) -> str:
+        s = m.split("/")[-1] if "/" in m else m
+        return s[:25] + "..." if len(s) > 28 else s
+
     fig = go.Figure(go.Table(
-        columnwidth=[140, 220, 90, 110, 110, 80, 80],
+        columnwidth=[130, 200, 70, 90, 90, 70, 70],
         header=dict(
             values=["Provider", "Model", "Status", "Last latency", "Last tokens", "Success", "Fail"],
             fill_color=colors.BACKGROUND_SECONDARY, font=_table_header_font(),
@@ -702,7 +700,7 @@ def build_llm_providers_table(rows: List[Dict[str, Any]], session_id: str = "n/a
         cells=dict(
             values=[
                 [r.get("provider_id", "") for r in ordered],
-                [(r.get("model", "") or "")[:48] for r in ordered],
+                [_fmt_model(r.get("model", "") or "") for r in ordered],
                 [r.get("last_status", "ok") for r in ordered],
                 [f"{r.get('last_latency_ms', 0.0):.0f} ms" for r in ordered],
                 [str(r.get("last_tokens", 0)) for r in ordered],
@@ -711,7 +709,7 @@ def build_llm_providers_table(rows: List[Dict[str, Any]], session_id: str = "n/a
             ],
             fill_color=[row_colors],
             font=_table_cell_font(text_colors),
-            align="left", height=26,
+            align="left", height=24,
         ),
     ))
     fig.update_layout(**_base_layout("LLM Providers (Featherless, last call per provider)", showlegend=False))
@@ -859,5 +857,5 @@ def build_decision_waterfall(steps: List[Dict[str, Any]]) -> go.Figure:
             align="left", height=26,
         ),
     ))
-    fig.update_layout(**_base_layout("Why did X Quant X trade? (one decision end-to-end)", showlegend=False))
+    fig.update_layout(**_base_layout("", showlegend=False))
     return fig

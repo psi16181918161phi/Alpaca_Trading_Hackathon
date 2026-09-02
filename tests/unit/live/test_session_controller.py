@@ -180,6 +180,57 @@ class TestSessionController(unittest.TestCase):
         finally:
             bad._validate_preflight = original
 
+    def test_start_generates_session_id(self):
+        """A fresh start must generate a stable session_id and persist it."""
+        self.controller.start(params={"stage": "dry_run",
+                                      "decision_interval_seconds": 60,
+                                      "symbol_universe": ["AAPL"]})
+        self.assertTrue(self._wait_for_state(SessionState.RUNNING.value))
+        on_disk = read_session_status(self.status_file)
+        self.assertIn("session_id", on_disk)
+        self.assertTrue(on_disk["session_id"].startswith("session-"))
+        # The status object must expose the same id.
+        self.assertEqual(self.controller.status.session_id, on_disk["session_id"])
+
+    def test_max_intervals_limits_cycles(self):
+        """When max_intervals is set, the thread must exit after that many cycles."""
+        self.controller.start(params={
+            "stage": "dry_run",
+            "decision_interval_seconds": 1,
+            "max_intervals": 2,
+            "symbol_universe": ["AAPL"],
+        })
+        self.assertTrue(self._wait_for_state(SessionState.RUNNING.value))
+        # 2 cycles × 1s wait + overhead. Must stop within 10s.
+        self.assertTrue(self._wait_for_state(SessionState.STOPPED.value, timeout_s=10))
+        on_disk = read_session_status(self.status_file)
+        self.assertEqual(on_disk["state"], SessionState.STOPPED.value)
+        self.assertGreaterEqual(on_disk["cycle_index"], 2)
+        self.assertLessEqual(on_disk["cycle_index"], 2)
+
+    def test_restart_after_stop(self):
+        """Starting after a stop must produce a fresh session_id and run again."""
+        self.controller.start(params={"stage": "dry_run",
+                                      "decision_interval_seconds": 1,
+                                      "symbol_universe": ["AAPL"]})
+        self.assertTrue(self._wait_for_state(SessionState.RUNNING.value))
+        first_id = self.controller.status.session_id
+        self.assertTrue(first_id)
+        self.controller.stop()
+        self.assertTrue(self._wait_for_state(SessionState.STOPPED.value, timeout_s=10))
+
+        # Restart.
+        self.controller.start(params={"stage": "dry_run",
+                                      "decision_interval_seconds": 1,
+                                      "symbol_universe": ["MSFT"]})
+        self.assertTrue(self._wait_for_state(SessionState.RUNNING.value))
+        second_id = self.controller.status.session_id
+        self.assertTrue(second_id)
+        self.assertNotEqual(first_id, second_id)
+        on_disk = read_session_status(self.status_file)
+        self.assertEqual(on_disk["session_id"], second_id)
+        self.assertEqual(on_disk["symbol_universe"], ["MSFT"])
+
     def test_thread_does_not_leak_after_stop(self):
         self.controller.start(params={"decision_interval_seconds": 60,
                                         "symbol_universe": ["AAPL"]})

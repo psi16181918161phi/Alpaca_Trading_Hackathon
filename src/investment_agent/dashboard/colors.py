@@ -104,7 +104,7 @@ PLOTLY_LAYOUT_DEFAULTS = dict(
                tickfont=dict(family=FONT_SANS, size=11)),
     yaxis=dict(gridcolor=GRID_LINE, zerolinecolor=GRID_LINE, showgrid=True,
                tickfont=dict(family=FONT_SANS, size=11)),
-    margin=dict(l=55, r=30, t=60, b=45),
+    margin=dict(l=55, r=30, t=60, b=65),
 )
 
 CARD_STYLE = {
