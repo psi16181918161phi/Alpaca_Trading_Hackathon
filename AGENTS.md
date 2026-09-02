@@ -28,7 +28,11 @@
    - Model: `finance-llama-8b`
    - Analyzes equity earnings metrics, valuation ratios, balance sheets, and growth.
 
-6. **Sector Specialist** (`FEATHERLESS_DEEPHERMES_KEY`)
+6. **Market State Specialist** (`FEATHERLESS_QWEN_TRADING_KEY` / `FEATHERLESS_DEEPHERMES_KEY`)
+   - Model: `Qwen/Qwen2.5-72B-Instruct` / `nousresearch/hermes-3-llama-3.8b`
+   - Analyzes order book dynamics, volume profile, volatility (ATR/VIX proxy), and momentum.
+
+7. **Sector Specialist** (`FEATHERLESS_DEEPHERMES_KEY`)
    - Model: `nousresearch/hermes-3-llama-3.8b`
    - Evaluates sector relative strength, industry tailwinds, and cross-asset correlations.
 

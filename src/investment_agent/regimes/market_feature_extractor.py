@@ -145,24 +145,36 @@ def _compute_macd(prices: np.ndarray, fast: int = _MACD_FAST,
     return macd_line[-1]
 
 
-def _compute_atr(prices: np.ndarray, period: int = 14) -> float:
-    """Compute Average True Range (normalized by price)."""
+def _compute_atr(
+    prices: np.ndarray,
+    period: int = 14,
+    highs: Optional[np.ndarray] = None,
+    lows: Optional[np.ndarray] = None,
+) -> float:
+    """Compute Average True Range (normalized by price).
+
+    If highs and lows arrays are provided, computes exact True Range using
+    high, low, and previous close. Otherwise uses price-change range proxy.
+    """
     if len(prices) < period + 1:
         return 0.0
-    
-    # Simplified ATR using price ranges
-    highs = prices[1:]  # Approximate
-    lows = prices[:-1]   # Approximate
-    closes = prices[1:]
-    
-    tr1 = highs - lows
-    tr2 = np.abs(highs - np.roll(closes, 1))
-    tr3 = np.abs(lows - np.roll(closes, 1))
-    
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))[1:]
-    
+
+    prev_closes = prices[:-1]
+
+    if highs is not None and lows is not None and len(highs) == len(prices) and len(lows) == len(prices):
+        h = highs[1:]
+        l = lows[1:]
+    else:
+        h = np.maximum(prices[1:], prices[:-1])
+        l = np.minimum(prices[1:], prices[:-1])
+
+    tr1 = h - l
+    tr2 = np.abs(h - prev_closes)
+    tr3 = np.abs(l - prev_closes)
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+
     atr = np.mean(tr[-period:])
-    return atr / prices[-1] if prices[-1] > 0 else 0.0
+    return float(atr / prices[-1]) if prices[-1] > 0 else 0.0
 
 
 def _compute_vix(prices: np.ndarray, period: int = 20) -> float:
@@ -346,6 +358,8 @@ def extract_single_feature_vector(prices: List[float],
 def compute_dict_features(
     prices: List[float],
     volumes: Optional[List[float]] = None,
+    highs: Optional[List[float]] = None,
+    lows: Optional[List[float]] = None,
 ) -> Dict[str, float]:
     """Compute real market feature dictionary (RSI, ATR, VIX, etc.) from price/volume series.
 
@@ -356,9 +370,12 @@ def compute_dict_features(
         return {"atr": 0.0, "rsi": 0.5, "vix": 0.15, "macd": 0.0, "vol_ratio": 1.0, "corr": 0.0, "hurst": 0.5}
 
     prices_arr = np.array(prices, dtype=np.float64)
+    highs_arr = np.array(highs, dtype=np.float64) if highs is not None else None
+    lows_arr = np.array(lows, dtype=np.float64) if lows is not None else None
+
     vix = _compute_vix(prices_arr) / 100.0  # decimal scale
     rsi = _compute_rsi(prices_arr) / 100.0  # 0.0 to 1.0
-    atr = _compute_atr(prices_arr)
+    atr = _compute_atr(prices_arr, highs=highs_arr, lows=lows_arr)
 
     return {
         "rsi": float(max(0.0, min(1.0, rsi))),

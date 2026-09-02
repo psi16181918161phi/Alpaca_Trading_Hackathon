@@ -190,6 +190,17 @@ class HMMRegimeDetector:
         self._impl = HMMRegimeDetectorImpl(params)
         self._config = config
 
+        # Fixed calibration scaler for mapping raw market features to standardized HMM space:
+        # [RSI, MACD, ATR, VIX, VolRatio, Corr, Hurst]
+        calib_cfg = config.get("calibration", {})
+        default_means = [50.0, 0.0, 0.02, 15.0, 1.0, 0.0, 0.5]
+        default_stds = [15.0, 2.0, 0.015, 10.0, 0.5, 0.4, 0.15]
+        means = calib_cfg.get("means", default_means)
+        stds = calib_cfg.get("stds", default_stds)
+        self._calibration_means = np.array(means, dtype=np.float64)
+        self._calibration_stds = np.array(stds, dtype=np.float64)
+        self._calibration_stds = np.where(self._calibration_stds < 1e-10, 1.0, self._calibration_stds)
+
     def classify(self, features: List[List[float]]) -> RegimeProbability:
         """Classify regime from feature sequence using HMM inference.
 
@@ -227,12 +238,11 @@ class HMMRegimeDetector:
         if np.any(np.isinf(obs)):
             raise ValueError("Feature vector contains Infinity values")
         
-        # Standardize features to match emission distribution assumptions
-        # Emission means in config are in standardized space (zero mean, unit variance)
-        feature_means = np.mean(obs, axis=0)
-        feature_stds = np.std(obs, axis=0)
-        feature_stds = np.where(feature_stds < 1e-10, 1.0, feature_stds)
-        obs_standardized = (obs - feature_means) / feature_stds
+        # Standardize features using fixed calibration scaler (not moving-window per inference)
+        # to ensure absolute market state maps consistently to calibrated emission distributions.
+        # Clip z-scores to [-4.0, 4.0] to prevent mathematical Gaussian underflow.
+        obs_standardized = (obs - self._calibration_means) / self._calibration_stds
+        obs_standardized = np.clip(obs_standardized, -4.0, 4.0)
         
         result = self._impl.classify(obs_standardized)
 
