@@ -41,7 +41,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -343,6 +343,34 @@ def extract_single_feature_vector(prices: List[float],
     return features[-1:, :]
 
 
+def compute_dict_features(
+    prices: List[float],
+    volumes: Optional[List[float]] = None,
+) -> Dict[str, float]:
+    """Compute real market feature dictionary (RSI, ATR, VIX, etc.) from price/volume series.
+
+    Returns a dict with 'rsi', 'atr', 'vix', 'macd', 'vol_ratio', 'corr', 'hurst'.
+    Normalizes RSI to [0.0, 1.0] for model consumption.
+    """
+    if not prices or len(prices) < 2:
+        return {"atr": 0.0, "rsi": 0.5, "vix": 0.15, "macd": 0.0, "vol_ratio": 1.0, "corr": 0.0, "hurst": 0.5}
+
+    prices_arr = np.array(prices, dtype=np.float64)
+    vix = _compute_vix(prices_arr) / 100.0  # decimal scale
+    rsi = _compute_rsi(prices_arr) / 100.0  # 0.0 to 1.0
+    atr = _compute_atr(prices_arr)
+
+    return {
+        "rsi": float(max(0.0, min(1.0, rsi))),
+        "atr": float(atr),
+        "vix": float(max(0.05, min(1.0, vix))),
+        "macd": float(_compute_macd(prices_arr)),
+        "vol_ratio": float(_compute_volume_ratio(np.array(volumes, dtype=np.float64))) if volumes and len(volumes) >= 5 else 1.0,
+        "corr": float(_compute_correlation(prices_arr, np.array(volumes, dtype=np.float64))) if volumes and len(volumes) >= 5 else 0.0,
+        "hurst": float(_compute_hurst(prices_arr)),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -351,4 +379,6 @@ __all__ = [
     "MarketFeatures",
     "extract_features",
     "extract_single_feature_vector",
+    "compute_dict_features",
 ]
+

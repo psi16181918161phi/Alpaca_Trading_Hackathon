@@ -202,6 +202,14 @@ class LiveOrchestrator:
         except (json.JSONDecodeError, OSError, KeyError, ValueError) as e:
             logger.warning("Failed to load live state: %s", e)
 
+        # Restore reputation tracker if reputation_file exists
+        if self.config.reputation_file and os.path.exists(self.config.reputation_file):
+            from ..agents.reputation_persistence import load_reputation
+            restored = load_reputation(self.config.reputation_file)
+            if restored is not None:
+                self._orch._reputation_tracker = restored
+                logger.info("Restored persisted agent reputation state from %s", self.config.reputation_file)
+
     def _save_state(self) -> None:
         payload = {
             "interval_index": self._interval_index,
@@ -582,15 +590,16 @@ class LiveOrchestrator:
             prices = bars["close"].astype(float).tolist()
             volumes = bars["volume"].astype(float).tolist() if "volume" in bars.columns else [0.0] * len(bars)
             current_price = float(prices[-1])
-            recent_return = (prices[-1] - prices[-2]) / prices[-2] if prices[-2] > 0 else 0.0
+            recent_return = (prices[-1] - prices[-2]) / prices[-2] if len(prices) >= 2 and prices[-2] > 0 else 0.0
+            from ..regimes.market_feature_extractor import compute_dict_features
+            features_dict = compute_dict_features(prices, volumes)
             bar_ctx = {
                 "timestamp": bars.index[-1].to_pydatetime() if hasattr(bars.index[-1], "to_pydatetime") else bars.index[-1],
                 "symbol": sym,
                 "prices": prices, "volumes": volumes,
                 "current_price": current_price, "recent_return": recent_return,
                 "regime": "R00", "regime_probabilities": {},
-                "features": {"atr": current_price - min(prices[-20:]),
-                             "rsi": 0.5, "vix": 0.2},
+                "features": features_dict,
                 "equity": self._equity, "drawdown_pct": -dd,
             }
             decision = self._run_one_candidate(screen, bar_ctx, circuit)

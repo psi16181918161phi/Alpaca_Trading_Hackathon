@@ -277,6 +277,9 @@ class AuditLog:
                 f.write(line.decode("utf-8"))
 
 
+from .agents.reputation_persistence import load_reputation, save_reputation
+
+
 # ---------------------------------------------------------------------------
 # Orchestrator
 # ---------------------------------------------------------------------------
@@ -320,6 +323,8 @@ class XQuantXOrchestrator:
         If True, actually submit orders via Alpaca (default False for safety).
     memory_file : str, optional
         Path to trade memory JSON file.
+    reputation_file : str, optional
+        Path to persistent reputation JSON file.
     """
 
     def __init__(
@@ -329,6 +334,7 @@ class XQuantXOrchestrator:
         use_hmm: bool = False,
         enable_trading: bool = False,
         memory_file: str = DEFAULT_MEMORY_FILE,
+        reputation_file: Optional[str] = "reputation_state.json",
         llm_provider: Optional[Any] = None,
     ) -> None:
         if not agent_ids:
@@ -339,6 +345,7 @@ class XQuantXOrchestrator:
         self._agent_ids = [aid.strip() for aid in agent_ids if aid.strip()]
         self._symbol = symbol
         self._enable_trading = enable_trading
+        self._reputation_file = reputation_file
 
         # Initialize components
         self._regime_detector = RegimeDetector(lookback_days=20)
@@ -346,12 +353,17 @@ class XQuantXOrchestrator:
         if use_hmm:
             self._hmm_detector = HMMRegimeDetector()
 
-        self._reputation_tracker = AgentReputationTracker(
-            agent_ids=self._agent_ids,
-            regimes=sorted(VALID_REGIMES),
-            prior_alpha=1.0,
-            prior_beta=1.0,
-        )
+        # Restore persisted reputation if file exists, else initialize fresh tracker
+        restored = load_reputation(reputation_file) if reputation_file else None
+        if restored is not None:
+            self._reputation_tracker = restored
+        else:
+            self._reputation_tracker = AgentReputationTracker(
+                agent_ids=self._agent_ids,
+                regimes=sorted(VALID_REGIMES),
+                prior_alpha=1.0,
+                prior_beta=1.0,
+            )
         self._kalman_filter = KalmanFilter(initial_price=100.0)
         self._trade_memory = TradeMemory(memory_file)
         self._audit_log = AuditLog()

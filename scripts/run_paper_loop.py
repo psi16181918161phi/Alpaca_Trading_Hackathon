@@ -37,50 +37,35 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
 
-def _load_llm_provider():
-    """Wire the multi-provider Featherless orchestrator if env keys exist,
-    otherwise fall back to the deterministic MockLLMProvider so the script
-    always runs end-to-end.
-    """
-    keys = {
-        "deephermes": os.getenv("FEATHERLESS_DEEPHERMES_KEY"),
-        "fundamentals": os.getenv("FEATHERLESS_FINANCE_LLAMA_KEY"),
-        "finance_qlora": os.getenv("FEATHERLESS_QWEN_TRADING_KEY"),
-        "reserve": os.getenv("FEATHERLESS_RESERVE_KEY"),
-    }
-    have_any = any(keys.values())
-    if not have_any:
-        print("INFO: no FEATHERLESS_*_KEY env vars set; using MockLLMProvider.",
-              file=sys.stderr)
-        from investment_agent.llm.base import MockLLMProvider
-        return MockLLMProvider(responder=_mock_responder)
+def _load_llm_provider(live: bool = False):
+    """Wire the multi-provider Featherless orchestrator if keys exist.
 
+    If live=True, mock provider fallback is strictly forbidden.
+    """
     try:
         from investment_agent.llm.orchestrator import (
-            FeatherlessOrchestrator,
-            load_provider_specs,
+            FeatherlessOrchestrator, load_provider_specs,
         )
-        from investment_agent.llm.base import FeatherlessProvider
-        specs_list = load_provider_specs()
-        # Index by provider_id; skip the reserve at this point -- it's added below.
-        specs = {s.provider_id: s for s in specs_list if s.provider_id != "reserve"}
-        providers = {pid: FeatherlessProvider(api_key=keys[pid], model=specs[pid].model)
-                     for pid in keys if keys[pid] and pid in specs}
-        reserve_provider = None
-        if "reserve" in keys and keys["reserve"]:
-            reserve_provider = FeatherlessProvider(
-                api_key=keys["reserve"],
-                model="Qwen/Qwen2.5-72B-Instruct",
-            )
-        return FeatherlessOrchestrator(
-            providers=providers, reserve_provider_id="reserve",
-            reserve_provider=reserve_provider,
-        )
+        specs = load_provider_specs()
+        valid_specs = [s for s in specs if s.api_key]
+        if valid_specs:
+            return FeatherlessOrchestrator(specs=valid_specs)
     except Exception as e:
-        print(f"WARN: failed to build Featherless orchestrator ({e}); using mock.",
-              file=sys.stderr)
-        from investment_agent.llm.base import MockLLMProvider
-        return MockLLMProvider(responder=_mock_responder)
+        if live:
+            raise RuntimeError(
+                f"FATAL: Live mode requires valid Featherless LLM keys. Error: {e}"
+            ) from e
+        print(f"WARN: failed to build Featherless orchestrator ({e}); using mock.", file=sys.stderr)
+
+    if live:
+        raise RuntimeError(
+            "FATAL: Live paper mode (--live) requires valid Featherless API keys. "
+            "Refusing to execute live paper trading with MockLLMProvider."
+        )
+
+    print("INFO: using MockLLMProvider for offline execution.", file=sys.stderr)
+    from investment_agent.llm.base import MockLLMProvider
+    return MockLLMProvider(responder=_mock_responder)
 
 
 def _mock_responder(system: Optional[str], prompt: str) -> str:
@@ -232,28 +217,56 @@ def main() -> int:
           f"({bars.index.min().date()} -> {bars.index.max().date()})")
 
     # 2. LLM provider
-    provider = _load_llm_provider()
+    provider = _load_llm_provider(live=args.live)
     from investment_agent.agents.specialist import (
         DEFAULT_ROLES, build_specialist_agents, AgentContext, run_agents,
     )
+    from investment_agent.regimes.market_feature_extractor import compute_dict_features
+    from investment_agent.memory.trade_memory import TradeMemory, TradeExperience
+
     agents = build_specialist_agents(provider)
     print(f"[2] LLM: {len(agents)} agents ready "
           f"(provider type: {type(provider).__name__})")
 
-    # 3. Regime from the price series (no LLM needed).
+    # 3. Regime classification.
     from investment_agent.regimes.regime_detector import RegimeDetector
     regime = RegimeDetector(lookback_days=20).classify(prices, volumes)
     print(f"[3] Regime: {regime.regime} (confidence={regime.confidence:.2f})")
+
+    # Retrieve past memories if available
+    tm = TradeMemory(args.memory)
+    memories = []
+    try:
+        dummy_exp = TradeExperience(
+            decision_id="preview", timestamp=datetime.now(), symbol=args.symbol,
+            regime=regime.regime, regime_probabilities=dict(regime.regime_affinity),
+            agent_signals={}, ensemble_signal=0.0, disagreement=0.0,
+            effective_confidence=0.5, kalman_gain=0.0, kalman_price=0.0, kalman_trend=0.0,
+            capital_gate_verdict="PREVIEW", effective_cap=0.0, state_charges={},
+            position_action="HOLD", quantity=0.0, confidence=0.5, expected_outcome="",
+            realized_outcome="", pnl=0.0, lesson="",
+        )
+        sims = tm.find_similar(dummy_exp, top_k=3, min_similarity=0.0)
+        memories = [
+            f"Past trade {s.experience.symbol} ({s.experience.regime}): "
+            f"Action={s.experience.position_action}, PnL=${s.experience.pnl:+.2f}, "
+            f"Lesson='{s.experience.lesson}'"
+            for s in sims
+        ]
+    except Exception:
+        memories = []
+
+    features_dict = compute_dict_features(prices, volumes)
 
     # 4. Run the seven specialist agents.
     ctx = AgentContext(
         symbol=args.symbol,
         regime=regime.regime,
         regime_probabilities=dict(regime.regime_affinity),
-        features={"atr": float(prices[-1] - min(prices[-20:])),
-                  "rsi": 0.5, "vix": 0.2},
+        features=features_dict,
         ensemble_signal=0.0,
         disagreement=0.0,
+        memory=memories,
     )
     agent_outputs_map = run_agents(agents, ctx)
     agent_outputs = [agent_outputs_map[r.agent_id] for r in DEFAULT_ROLES]
@@ -271,9 +284,10 @@ def main() -> int:
     orch = XQuantXOrchestrator(
         agent_ids=[r.agent_id for r in DEFAULT_ROLES],
         symbol=args.symbol,
-        use_hmm=False,
+        use_hmm=True,
         enable_trading=False,
         memory_file=args.memory,
+        reputation_file=args.reputation,
     )
     states = SevenStateVector(
         economic=1.0, financial=1.0, fiscal=1.0,

@@ -145,42 +145,36 @@ def _print_report(report, last_reputations: Optional[Dict[str, Dict[str, float]]
                   f"mean={(p['alpha'] / max(1e-9, p['alpha']+p['beta'])):.2f}")
 
 
-def _load_llm_provider():
-    """Return a mock or real LLM provider based on env keys."""
-    keys = {
-        "deephermes": os.getenv("FEATHERLESS_DEEPHERMES_KEY"),
-        "fundamentals": os.getenv("FEATHERLESS_FINANCE_LLAMA_KEY"),
-        "finance_qlora": os.getenv("FEATHERLESS_QWEN_TRADING_KEY"),
-        "reserve": os.getenv("FEATHERLESS_RESERVE_KEY"),
-    }
-    have_any = any(keys.values())
-    if not have_any:
-        print("[llm] no FEATHERLESS_*_KEY env vars set; using MockLLMProvider.",
-              file=sys.stderr)
-        from investment_agent.llm.base import MockLLMProvider
-        return MockLLMProvider(responder=_mock_responder), "mock"
+def _load_llm_provider(stage: str = "dry_run"):
+    """Return a mock or real LLM provider based on env keys.
 
+    If stage is 'paper' or 'competition', fallback to MockLLMProvider is strictly forbidden.
+    """
     try:
         from investment_agent.llm.orchestrator import (
-            FeatherlessOrchestrator, load_provider_specs, ProviderSpec,
+            FeatherlessOrchestrator, load_provider_specs,
         )
-        from investment_agent.llm.base import FeatherlessProvider
-        # Inject env keys into the spec loader's view.
-        for pid, key in keys.items():
-            if key:
-                os.environ[f"FEATHERLESS_{pid.upper()}_KEY"] = key
         specs = load_provider_specs()
-        # Drop specs with no key.
-        specs = [s for s in specs if s.api_key]
-        if not specs:
-            raise RuntimeError("no Featherless provider specs have keys set")
-        # The orchestrator's constructor builds providers from the specs.
-        return FeatherlessOrchestrator(specs=specs), "featherless"
+        valid_specs = [s for s in specs if s.api_key]
+        if valid_specs:
+            return FeatherlessOrchestrator(specs=valid_specs), "featherless"
     except Exception as e:
-        print(f"WARN: failed to build Featherless orchestrator ({e}); using mock.",
-              file=sys.stderr)
-        from investment_agent.llm.base import MockLLMProvider
-        return MockLLMProvider(responder=_mock_responder), "mock"
+        if stage in {"paper", "competition"}:
+            raise RuntimeError(
+                f"FATAL: Live paper/competition mode requires valid Featherless LLM keys. "
+                f"Cannot run live trading with MockLLMProvider. Error: {e}"
+            ) from e
+        print(f"WARN: failed to build Featherless orchestrator ({e}); using mock.", file=sys.stderr)
+
+    if stage in {"paper", "competition"}:
+        raise RuntimeError(
+            "FATAL: Live paper/competition mode requires valid Featherless LLM keys "
+            "(FEATHERLESS_*_KEY). Refusing to run live trading with MockLLMProvider."
+        )
+
+    print("[llm] using MockLLMProvider for offline / dry_run testing.", file=sys.stderr)
+    from investment_agent.llm.base import MockLLMProvider
+    return MockLLMProvider(responder=_mock_responder), "mock"
 
 
 def _mock_responder(system, prompt):
@@ -210,13 +204,43 @@ def _mock_responder(system, prompt):
     })
 
 
-def _build_agent_factory(provider, default_roles):
+def _build_agent_factory(provider, default_roles, memory_file: Optional[str] = None):
     from investment_agent.agents.specialist import (
         build_specialist_agents, AgentContext, run_agents,
     )
+    from investment_agent.memory.trade_memory import TradeMemory, TradeExperience
+    import uuid
+
     agents = build_specialist_agents(provider)
     canonical_ids = [r.agent_id for r in default_roles]
+    tm = TradeMemory(memory_file) if memory_file else None
+
     def factory(bar_ctx):
+        memories = []
+        if tm and bar_ctx.get("symbol"):
+            try:
+                dummy_exp = TradeExperience(
+                    decision_id=str(uuid.uuid4()),
+                    timestamp=datetime.now(),
+                    symbol=bar_ctx["symbol"],
+                    regime=bar_ctx.get("regime", "R01"),
+                    regime_probabilities=bar_ctx.get("regime_probabilities", {}),
+                    agent_signals={}, ensemble_signal=0.0, disagreement=0.0,
+                    effective_confidence=0.5, kalman_gain=0.0, kalman_price=0.0, kalman_trend=0.0,
+                    capital_gate_verdict="PREVIEW", effective_cap=0.0, state_charges={},
+                    position_action="HOLD", quantity=0.0, confidence=0.5, expected_outcome="",
+                    realized_outcome="", pnl=0.0, lesson="",
+                )
+                sims = tm.find_similar(dummy_exp, top_k=3, min_similarity=0.0)
+                memories = [
+                    f"Past trade {s.experience.symbol} ({s.experience.regime}): "
+                    f"Action={s.experience.position_action}, PnL=${s.experience.pnl:+.2f}, "
+                    f"Lesson='{s.experience.lesson}'"
+                    for s in sims
+                ]
+            except Exception:
+                memories = []
+
         ctx = AgentContext(
             symbol=bar_ctx["symbol"],
             regime=bar_ctx.get("regime", "R01"),
@@ -224,6 +248,7 @@ def _build_agent_factory(provider, default_roles):
             features=bar_ctx.get("features", {}),
             ensemble_signal=0.0,
             disagreement=0.0,
+            memory=memories,
         )
         out_map = run_agents(agents, ctx)
         # Re-key to the canonical IDs the orchestrator expects.
@@ -377,8 +402,8 @@ def main() -> int:
     )
 
     # LLM
-    provider, llm_kind = _load_llm_provider()
-    factory = _build_agent_factory(provider, DEFAULT_ROLES)
+    provider, llm_kind = _load_llm_provider(args.stage)
+    factory = _build_agent_factory(provider, DEFAULT_ROLES, args.memory_file)
     print(f"[init] stage={args.stage}  llm={llm_kind}  market={md_kind}  "
           f"universe={','.join(universe)}  interval={args.interval}s",
           file=sys.stderr)
