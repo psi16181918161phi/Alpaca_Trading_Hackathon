@@ -1,0 +1,12 @@
+[tool.mutmut]
+# Mutation testing scope is intentionally bounded to the two highest-value,
+# smallest-surface risk-verdict modules (see
+# CHATS/2026-09-02_archive-consolidation-regression-suite-PLAN.md Task P2-04)
+# rather than the entire src/investment_agent tree, to keep a single
+# `mutmut run` invocation fast and its surviving-mutant list reviewable.
+paths_to_mutate = [
+    "src/investment_agent/capital/capital_gate.py",
+    "src/investment_agent/products/product_gate.py",
+]
+tests_dir = "tests/"
+runner = "python -m pytest -x -q tests/unit/capital tests/unit/products tests/correctness"

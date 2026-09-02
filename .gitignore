@@ -251,6 +251,15 @@ audit_log.jsonl
 llm_usage.jsonl
 llm_keys.json
 
+# Python test/coverage/mutation tooling caches
+__pycache__/
+.pytest_cache/
+.benchmarks/
+.mutmut-cache
+htmlcov/
+.coverage
+.coverage.*
+
 # Keep VS Code MCP config (credentials are NOT stored in it — they use input prompts)
 !.vscode/
 !.vscode/mcp.json

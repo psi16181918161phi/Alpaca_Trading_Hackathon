@@ -70,10 +70,13 @@ class TestSessionController(unittest.TestCase):
         )
 
     def tearDown(self):
-        # Make sure no threads leak.
-        if self.controller._thread is not None and self.controller._thread.is_alive():
+        # Make sure no threads leak. stop() now joins internally, so the
+        # thread reference is captured up front rather than re-read
+        # afterward (stop() may have already cleared it to None).
+        thread = self.controller._thread
+        if thread is not None and thread.is_alive():
             self.controller.stop()
-            self.controller._thread.join(timeout=3)
+            thread.join(timeout=3)
         for f in os.listdir(self.tmpdir):
             try:
                 os.unlink(os.path.join(self.tmpdir, f))

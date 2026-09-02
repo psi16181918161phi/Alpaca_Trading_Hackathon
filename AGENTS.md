@@ -118,5 +118,13 @@ python scripts/run_paper_loop.py --symbol AAPL --reputation reputation_state.jso
 Launch the interactive web dashboard with session control and manual order placement:
 
 ```bash
-python src/investment_agent/dashboard/app.py
+python scripts/run_dashboard.py
+```
+
+### 4. Hedge Watchlist Monitor
+Run a single hedge-check pass, or loop forever, across a symbol watchlist:
+
+```bash
+python scripts/run_hedge_watchlist.py --once --watchlist AAPL MSFT TSLA
+python scripts/run_hedge_watchlist.py --watchlist AAPL MSFT TSLA --interval 300
 ```

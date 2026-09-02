@@ -60,6 +60,15 @@ data the caller wants to surface. The factory must return exactly
 seven AgentOutput objects matching the orchestrator's agent_ids.
 """
 
+# Trailing window (in bars) passed to the orchestrator/regime detector
+# per bar. Regime feature extraction only ever consumes the trailing
+# ~49 bars (_MIN_OBSERVATIONS=30 + lookback_days=20 - 1); this constant
+# is set with a generous safety margin above that. Bounding the window
+# (instead of slicing the full closes[:i+1]/volumes[:i+1] history every
+# bar) turns the replay loop's per-bar cost from O(bars_so_far) into
+# O(1), i.e. the whole replay from O(n^2) into O(n).
+_HISTORY_WINDOW_BARS: int = 120
+
 
 @dataclass
 class ReplayConfig:
@@ -278,11 +287,17 @@ class ReplayEngine:
         # without producing a decision.
         states_full = self._seven_state_full()
         for i in range(config.lookback, len(bars)):
+            # Bounded trailing window: still strictly historical (no
+            # look-ahead) but capped so per-bar cost does not grow with
+            # the size of the replay (see _HISTORY_WINDOW_BARS above).
+            window_start = max(0, i + 1 - _HISTORY_WINDOW_BARS)
+            recent_closes = closes[window_start : i + 1]
+            recent_volumes = volumes[window_start : i + 1]
             bar_ctx = {
                 "timestamp": timestamps[i].to_pydatetime() if hasattr(timestamps[i], "to_pydatetime") else timestamps[i],
                 "symbol": config.symbol,
-                "prices": closes[: i + 1],
-                "volumes": volumes[: i + 1],
+                "prices": recent_closes,
+                "volumes": recent_volumes,
                 "current_price": closes[i],
                 "recent_return": (closes[i] - closes[i - 1]) / closes[i - 1] if closes[i - 1] > 0 else 0.0,
                 "lookback_returns": [
@@ -301,15 +316,15 @@ class ReplayEngine:
 
             portfolio_ctx = self._portfolio_context(
                 price=closes[i],
-                prices=closes[: i + 1],
+                prices=recent_closes,
                 drawdown_pct=max_drawdown_pct,
                 equity=equity,
                 positions_qty=positions_qty,
             )
 
             cycle = self._orchestrator.run_cycle(
-                prices=closes[: i + 1],
-                volumes=volumes[: i + 1],
+                prices=recent_closes,
+                volumes=recent_volumes,
                 agent_outputs=agent_outputs,
                 states=states_full,
                 portfolio_context=portfolio_ctx,

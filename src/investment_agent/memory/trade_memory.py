@@ -87,6 +87,15 @@ DEFAULT_MEMORY_FILE: str = "trade_memory.json"
 # Maximum number of experiences to retain per symbol
 MAX_MEMORY_PER_SYMBOL: int = 1000
 
+# Candidate pool size for find_similar's linear similarity scan. Bounded to
+# the most recent N experiences (rather than the full, unbounded history)
+# so per-call cost stays O(1) relative to total history size instead of
+# O(experiences_so_far) -- the most recent trades are also the most
+# regime-relevant matches for a live/replay similarity lookup. This does
+# not change MAX_MEMORY_PER_SYMBOL's eventual retention cap, only how many
+# of the retained records a single find_similar() call compares against.
+_SIMILARITY_CANDIDATE_WINDOW: int = 300
+
 # Similarity feature weights
 _SIMILARITY_WEIGHTS = {
     "regime_probabilities": 3.0,
@@ -607,7 +616,8 @@ class TradeMemory:
         """
         scored: List[SimilarExperience] = []
 
-        for hist in self._experiences:
+        candidates = self._experiences[-_SIMILARITY_CANDIDATE_WINDOW:]
+        for hist in candidates:
             if exclude_decision_id and hist.decision_id == exclude_decision_id:
                 continue
             score, market_sim, portfolio_sim, reasons = self._compute_similarity(current, hist)

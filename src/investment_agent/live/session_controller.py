@@ -308,10 +308,16 @@ class SessionController:
         return True
 
     def stop(self, emergency: bool = False) -> bool:
-        """Request a (emergency) stop. Returns True if a stop was scheduled."""
+        """Request a (emergency) stop. Returns True if a stop was scheduled.
+
+        Blocks (bounded) until the background thread has fully exited,
+        so that a subsequent ``start()`` never races against the old
+        thread's not-yet-cleared ``_thread`` reference.
+        """
         with self._lock:
             if self._thread is None or not self._thread.is_alive():
                 return False
+            thread = self._thread
             self._stop_requested.set()
             if emergency:
                 self._emergency_stop.set()
@@ -320,6 +326,9 @@ class SessionController:
                        else SessionState.STOPPING.value),
                 stopped_at=datetime.now(timezone.utc).isoformat(),
             )
+        # Join outside the lock: _run_session's finally block needs the
+        # lock to clear self._thread and persist the final STOPPED status.
+        thread.join(timeout=30)
         return True
 
     def _run_session(self) -> None:

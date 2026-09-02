@@ -1,0 +1,21 @@
+# Alternative dependency path (per
+# alpaca_paper_trading_specifications_x_quant_x/007_xquantx_virtual_env.txt
+# section 1.6.3, which mandates Conan 2.x). The default/verified build path
+# in CMakeLists.txt uses CMake FetchContent instead (no separate `conan
+# install` step required), because building gtest 1.14.0 from source via
+# Conan's default MSVC profile failed on this machine (gtest CMake
+# configure error under the detected msvc/195 toolchain). If your
+# environment has a working Conan+CMake MSVC/Ninja setup, this file can be
+# used instead: run `conan install . --output-folder=../../build/cpp
+# --build=missing` then configure with
+# `-DCMAKE_TOOLCHAIN_FILE=<output-folder>/conan_toolchain.cmake`.
+[requires]
+eigen/3.4.0
+gtest/1.14.0
+
+[generators]
+CMakeDeps
+CMakeToolchain
+
+[options]
+gtest/*:shared=False

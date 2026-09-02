@@ -15,6 +15,8 @@ pub struct TradeDecision {
     pub timestamp: String,
 }
 
+/// Loads trade decisions from JSON, validates them in parallel, and sorts the
+/// accepted records by timestamp.
 pub fn load_and_validate(path: &Path) -> Result<Vec<TradeDecision>> {
     let raw = fs::read_to_string(path)
         .with_context(|| format!("failed to read {}", path.display()))?;
@@ -27,7 +29,7 @@ pub fn load_and_validate(path: &Path) -> Result<Vec<TradeDecision>> {
     }
 
     let (tx, rx) = mpsc::channel();
-    let worker_count = 4.min(records.len());
+    let worker_count = MAX_WORKERS.min(records.len());
     let chunk_size = (records.len() + worker_count - 1) / worker_count;
     let mut handles = Vec::new();
 
@@ -48,13 +50,17 @@ pub fn load_and_validate(path: &Path) -> Result<Vec<TradeDecision>> {
     drop(tx);
 
     for handle in handles {
-        handle.join().expect("pipeline worker thread panicked");
+        handle
+            .join()
+            .map_err(|_| anyhow::anyhow!("pipeline worker thread panicked"))?;
     }
 
     let mut valid: Vec<TradeDecision> = rx.into_iter().flatten().collect();
     valid.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
     Ok(valid)
 }
+
+const MAX_WORKERS: usize = 4;
 
 fn is_valid(r: &TradeDecision) -> bool {
     !r.symbol.trim().is_empty()
