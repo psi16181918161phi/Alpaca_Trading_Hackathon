@@ -207,5 +207,81 @@ class TestGetOrderHistory(unittest.TestCase):
             self.assertIsNone(result[0]["filled_qty"])
 
 
+class TestClosePosition(unittest.TestCase):
+    def test_close_position_no_position(self):
+        fake_client = MagicMock()
+        fake_client.get_open_position.side_effect = Exception("Position not found")
+        with patch.object(execution, "_get_trading_client", return_value=fake_client):
+            res = execution.close_position("AAPL")
+            self.assertTrue(res["ok"])
+            self.assertEqual(res["reason"], "No open position found")
+            self.assertEqual(res["closed_qty"], 0.0)
+
+    def test_close_position_zero_qty(self):
+        fake_client = MagicMock()
+        fake_pos = MagicMock(qty="0.0", avg_entry_price="150.0")
+        fake_client.get_open_position.return_value = fake_pos
+        with patch.object(execution, "_get_trading_client", return_value=fake_client):
+            res = execution.close_position("AAPL")
+            self.assertTrue(res["ok"])
+            self.assertEqual(res["reason"], "Position is already zero")
+
+    def test_close_position_blocked_by_safety(self):
+        fake_client = MagicMock()
+        fake_pos = MagicMock(qty="10.0", avg_entry_price="150.0")
+        fake_client.get_open_position.return_value = fake_pos
+        with patch.object(execution, "is_trade_safe", return_value=False):
+            with patch.object(execution, "_get_trading_client", return_value=fake_client):
+                res = execution.close_position("AAPL")
+                self.assertFalse(res["ok"])
+                self.assertEqual(res["reason"], "Position close blocked by is_trade_safe()")
+
+    def test_close_position_long_success(self):
+        fake_client = MagicMock()
+        fake_pos = MagicMock(qty="10.0", avg_entry_price="150.0")
+        fake_client.get_open_position.side_effect = [fake_pos, Exception("No position remaining")]
+        fake_result = MagicMock(id="close-order-1", status="filled")
+        fake_client.submit_order.return_value = fake_result
+        with patch.object(execution, "is_trade_safe", return_value=True):
+            with patch.object(execution, "_get_trading_client", return_value=fake_client):
+                res = execution.close_position("AAPL")
+                self.assertTrue(res["ok"])
+                self.assertEqual(res["order_id"], "close-order-1")
+                self.assertEqual(res["closed_qty"], 10.0)
+
+                sent_order = fake_client.submit_order.call_args[0][0]
+                self.assertEqual(sent_order.side, execution.OrderSide.SELL)
+                self.assertEqual(sent_order.qty, 10.0)
+
+    def test_close_position_short_cover_success(self):
+        fake_client = MagicMock()
+        fake_pos = MagicMock(qty="-5.0", avg_entry_price="150.0")
+        fake_client.get_open_position.side_effect = [fake_pos, Exception("No position remaining")]
+        fake_result = MagicMock(id="cover-order-1", status="filled")
+        fake_client.submit_order.return_value = fake_result
+        with patch.object(execution, "is_trade_safe", return_value=True):
+            with patch.object(execution, "_get_trading_client", return_value=fake_client):
+                res = execution.close_position("TSLA")
+                self.assertTrue(res["ok"])
+                self.assertEqual(res["order_id"], "cover-order-1")
+                self.assertEqual(res["closed_qty"], 5.0)
+
+                sent_order = fake_client.submit_order.call_args[0][0]
+                self.assertEqual(sent_order.side, execution.OrderSide.BUY)
+                self.assertEqual(sent_order.qty, 5.0)
+
+
+class TestCancelAllOrdersAndClosePositions(unittest.TestCase):
+    def test_emergency_flatten_flow(self):
+        fake_client = MagicMock()
+        fake_client.cancel_orders.return_value = [MagicMock(), MagicMock()]
+        fake_client.close_all_positions.return_value = [MagicMock()]
+        with patch.object(execution, "_get_trading_client", return_value=fake_client):
+            res = execution.cancel_all_orders_and_close_positions()
+            self.assertTrue(res["ok"])
+            self.assertEqual(res["cancelled_orders"], 2)
+            self.assertEqual(res["closed_positions"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()
