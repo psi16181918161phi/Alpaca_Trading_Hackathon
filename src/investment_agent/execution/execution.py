@@ -468,17 +468,11 @@ def close_position(symbol: str) -> Dict[str, Any]:
             "position_after": 0.0,
         }
 
-    # --- 2. Safety check ----------------------------------------------------
+    # --- 2. Sizing (exits ALWAYS bypass the position-size safety gate) -------
+    # is_trade_safe() enforces a maximum *entry* size relative to buying power.
+    # Blocking an exit with the same rule is wrong: if we can't exit a position
+    # because it grew too large, we'd be stuck. The close is unconditional.
     close_qty = abs(position_before)
-    if not is_trade_safe(symbol, close_qty, avg_price):
-        return {
-            "ok": False,
-            "order_id": None,
-            "closed_qty": 0.0,
-            "reason": "Position close blocked by is_trade_safe()",
-            "position_before": position_before,
-            "position_after": position_before,
-        }
 
     # --- 3. Submit SELL for exactly held_qty --------------------------------
     side = OrderSide.SELL if position_before > 0 else OrderSide.BUY  # short cover
@@ -510,6 +504,108 @@ def close_position(symbol: str) -> Dict[str, Any]:
         "position_after": position_after,
     }
 
+
+
+# ---------------------------------------------------------------------------
+# Order-status polling + partial-fill helpers
+# ---------------------------------------------------------------------------
+
+import time as _time
+from typing import List as _List
+
+
+def poll_order_status(
+    order_id: str,
+    *,
+    timeout_seconds: float = 30.0,
+    poll_interval_seconds: float = 1.0,
+) -> Dict[str, Any]:
+    """Poll Alpaca until an order reaches a terminal state or timeout.
+
+    Terminal states: filled, partially_filled, cancelled, expired, rejected.
+
+    Returns
+    -------
+    dict with keys:
+        order_id        : str
+        status          : str   — final Alpaca order status string
+        filled_qty      : float — total shares filled
+        remaining_qty   : float — ordered qty minus filled qty
+        filled_avg_price: float | None
+        is_terminal     : bool
+        timed_out       : bool
+        raw             : dict  — full broker order snapshot
+    """
+    _TERMINAL = {"filled", "partially_filled", "cancelled", "expired", "rejected"}
+    client = _get_trading_client()
+    deadline = _time.monotonic() + timeout_seconds
+    last_status = "unknown"
+    last_raw: Dict[str, Any] = {}
+
+    while _time.monotonic() < deadline:
+        try:
+            order = client.get_order_by_id(order_id)
+            last_status = str(
+                getattr(getattr(order, "status", ""), "value", order.status)
+            )
+            filled_qty = _safe_float(getattr(order, "filled_qty", None)) or 0.0
+            qty = _safe_float(getattr(order, "qty", None)) or 0.0
+            fill_price = _safe_float(getattr(order, "filled_avg_price", None))
+            last_raw = {
+                "order_id": order_id,
+                "status": last_status,
+                "filled_qty": filled_qty,
+                "remaining_qty": max(0.0, qty - filled_qty),
+                "filled_avg_price": fill_price,
+                "is_terminal": last_status in _TERMINAL,
+                "timed_out": False,
+                "raw": {
+                    "symbol": getattr(order, "symbol", ""),
+                    "side": str(getattr(getattr(order, "side", ""), "value", "")),
+                    "qty": qty,
+                    "submitted_at": str(getattr(order, "submitted_at", "")),
+                    "filled_at": str(getattr(order, "filled_at", "")),
+                },
+            }
+            if last_status in _TERMINAL:
+                return last_raw
+        except Exception as exc:
+            print(f"poll_order_status: error fetching {order_id}: {exc}")
+        _time.sleep(poll_interval_seconds)
+
+    # Timed out
+    last_raw["timed_out"] = True
+    last_raw["is_terminal"] = False
+    return last_raw
+
+
+def apply_fill(
+    result: "ExecutionResult",
+    poll_snapshot: Dict[str, Any],
+) -> "ExecutionResult":
+    """Return a new ExecutionResult updated with broker fill data.
+
+    Parameters
+    ----------
+    result : ExecutionResult
+        The original result returned by place_order / close_position.
+    poll_snapshot : dict
+        The dict returned by poll_order_status.
+
+    Returns
+    -------
+    ExecutionResult
+        A new (updated) ExecutionResult; the original is unchanged.
+    """
+    return ExecutionResult(
+        submitted=result.submitted,
+        status=poll_snapshot.get("status", result.status),
+        order_id=result.order_id,
+        reason=result.reason,
+        filled_qty=float(poll_snapshot.get("filled_qty") or 0.0),
+        filled_avg_price=float(poll_snapshot.get("filled_avg_price") or 0.0),
+        raw_order=result.raw_order,
+    )
 
 
 if __name__ == "__main__":

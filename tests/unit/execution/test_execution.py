@@ -226,15 +226,19 @@ class TestClosePosition(unittest.TestCase):
             self.assertTrue(res["ok"])
             self.assertEqual(res["reason"], "Position is already zero")
 
-    def test_close_position_blocked_by_safety(self):
+    def test_close_position_bypasses_entry_safety(self):
+        """Full-close sizing bypass: close_position must not be blocked by is_trade_safe."""
         fake_client = MagicMock()
         fake_pos = MagicMock(qty="10.0", avg_entry_price="150.0")
-        fake_client.get_open_position.return_value = fake_pos
+        fake_client.get_open_position.side_effect = [fake_pos, Exception("Position closed")]
+        fake_result = MagicMock(id="close-order-bypass", status="accepted")
+        fake_client.submit_order.return_value = fake_result
         with patch.object(execution, "is_trade_safe", return_value=False):
             with patch.object(execution, "_get_trading_client", return_value=fake_client):
                 res = execution.close_position("AAPL")
-                self.assertFalse(res["ok"])
-                self.assertEqual(res["reason"], "Position close blocked by is_trade_safe()")
+                self.assertTrue(res["ok"])
+                self.assertEqual(res["order_id"], "close-order-bypass")
+                self.assertEqual(res["closed_qty"], 10.0)
 
     def test_close_position_long_success(self):
         fake_client = MagicMock()

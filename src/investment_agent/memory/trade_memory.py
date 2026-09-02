@@ -823,6 +823,31 @@ class TradeMemory:
             "worst_trade": min(pnls) if pnls else 0.0,
         }
 
+    def get_performance_summary_by_regime(
+        self,
+        symbol: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Compute regime-by-regime performance attribution for CLOSED trades.
+
+        Groups completed experiences by HMM regime label and computes
+        win-rate, avg/total P&L, Sharpe proxy, and signal statistics per regime.
+
+        Parameters
+        ----------
+        symbol : Optional[str]
+            If provided, restrict to this symbol.
+
+        Returns
+        -------
+        Dict[str, Dict[str, Any]]
+            Outer keys are regime labels (e.g. ``"R01"``); inner dicts carry
+            ``count``, ``win_rate``, ``avg_pnl``, ``total_pnl``, ``best_trade``,
+            ``worst_trade``, ``pnl_std``, ``sharpe``, ``avg_signal``,
+            ``avg_confidence``, ``avg_disagreement``, ``avg_kalman_gain``.
+        """
+        from investment_agent.execution.fill_reconciler import performance_by_regime
+        return performance_by_regime(self, symbol=symbol)
+
     def clear(self) -> None:
         """Clear all experiences from memory."""
         self._experiences = []
