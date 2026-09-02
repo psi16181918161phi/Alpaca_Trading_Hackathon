@@ -210,7 +210,7 @@ def _render_control_room(_n_clicks):
 # CLI / env. The dashboard only tells the daemon to start, not how.
 DEFAULT_SESSION_PARAMS: Dict[str, Any] = {
     "stage": "paper",
-    "decision_interval_seconds": 300,
+    "decision_interval_seconds": 60,
     "symbol_universe": [
         "AAPL", "SPY", "MSFT", "TSLA", "NVDA",
         "BTC/USD", "ETH/USD", "SOL/USD", "AVAX/USD",

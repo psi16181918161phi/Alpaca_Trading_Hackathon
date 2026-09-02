@@ -28,7 +28,7 @@ Run from the project root::
 Optional flags::
 
     --stage paper           paper / dry_run / competition
-    --interval 300          Decision interval in seconds
+    --interval 60          Decision interval in seconds
     --max-lookups 2         Max LLM calls per decision interval
     --symbols AAPL,SPY,...  Symbol universe
     --status-file PATH      Where the daemon persists status (default:
@@ -357,7 +357,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--stage", default="paper",
                         choices=["dry_run", "paper", "competition"])
-    parser.add_argument("--interval", type=int, default=300,
+    parser.add_argument("--interval", type=int, default=60,
                         help="Decision interval in seconds")
     parser.add_argument("--max-lookups", type=int, default=2,
                         help="Max LLM calls per decision interval")

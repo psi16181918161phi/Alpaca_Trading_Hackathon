@@ -89,7 +89,7 @@ class SessionStatus:
     last_error: str = ""
     cycle_index: int = 0
     next_cycle_at: Optional[str] = None
-    decision_interval_seconds: int = 300
+    decision_interval_seconds: int = 60
     symbol_universe: List[str] = field(default_factory=list)
     max_lookups_per_interval: int = 2
     total_decisions: int = 0
@@ -290,7 +290,7 @@ class SessionController:
                 total_closed=0,
                 stage=str(self._start_params.get("stage", "paper")),
                 decision_interval_seconds=int(
-                    self._start_params.get("decision_interval_seconds", 300)),
+                    self._start_params.get("decision_interval_seconds", 60)),
                 symbol_universe=list(
                     self._start_params.get("symbol_universe", [])),
                 max_lookups_per_interval=int(
@@ -334,7 +334,7 @@ class SessionController:
             self._orchestrator = self._build_orchestrator()
             self._update_status(state=SessionState.RUNNING.value)
 
-            interval = max(1, int(self._start_params.get("decision_interval_seconds", 300)))
+            interval = max(1, int(self._start_params.get("decision_interval_seconds", 60)))
             max_intervals = self._start_params.get("max_intervals")
             cycles_run = 0
 
@@ -402,7 +402,7 @@ class SessionController:
                 last_decision = f"{act} {sym} ({prod})"
         except Exception:  # noqa: BLE001
             pass
-        interval = int(self._start_params.get("decision_interval_seconds", 300))
+        interval = int(self._start_params.get("decision_interval_seconds", 60))
         next_at = None
         try:
             next_at = (datetime.now(timezone.utc).timestamp() + interval)
