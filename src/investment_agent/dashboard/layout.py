@@ -359,7 +359,7 @@ def session_control_panel(session_status, command_file="/tmp/session_command.jso
             ),
             html.Div(
                 children=[
-                    html.Span("UNIVERSE: " + ", ".join(universe) if universe else "UNIVERSE: n/a",
+                    html.Span("UNIVERSE: " + (", ".join(universe) if universe else "n/a"),
                               style={"color": colors.TEXT_SECONDARY,
                                      "fontFamily": colors.FONT_MONO, "fontSize": "11px",
                                      "marginRight": "16px"}),
@@ -377,6 +377,108 @@ def session_control_panel(session_status, command_file="/tmp/session_command.jso
                     "marginTop": "6px",
                 },
             ) if last_error else None),
+            html.Div(
+                children=[
+                    html.Div(
+                        "MANUAL ORDER CONTROLS",
+                        style={
+                            "fontSize": "11px", "color": colors.TEXT_SECONDARY,
+                            "letterSpacing": "1.5px", "fontWeight": "700",
+                            "marginTop": "14px", "marginBottom": "8px",
+                        },
+                    ),
+                    html.Div(
+                        children=[
+                            dcc.Input(
+                                id="manual-symbol-input",
+                                type="text",
+                                value="AAPL",
+                                placeholder="Symbol",
+                                style={
+                                    "backgroundColor": "#1A2234", "color": "#FFFFFF",
+                                    "border": "1px solid " + colors.BORDER,
+                                    "padding": "8px 12px", "borderRadius": "4px",
+                                    "fontFamily": colors.FONT_MONO, "fontSize": "12px",
+                                    "width": "90px", "marginRight": "8px",
+                                },
+                            ),
+                            dcc.Input(
+                                id="manual-qty-input",
+                                type="number",
+                                value=1,
+                                min=1,
+                                placeholder="Qty",
+                                style={
+                                    "backgroundColor": "#1A2234", "color": "#FFFFFF",
+                                    "border": "1px solid " + colors.BORDER,
+                                    "padding": "8px 12px", "borderRadius": "4px",
+                                    "fontFamily": colors.FONT_MONO, "fontSize": "12px",
+                                    "width": "70px", "marginRight": "8px",
+                                },
+                            ),
+                            dcc.Input(
+                                id="manual-price-input",
+                                type="number",
+                                value=150.0,
+                                placeholder="Price",
+                                style={
+                                    "backgroundColor": "#1A2234", "color": "#FFFFFF",
+                                    "border": "1px solid " + colors.BORDER,
+                                    "padding": "8px 12px", "borderRadius": "4px",
+                                    "fontFamily": colors.FONT_MONO, "fontSize": "12px",
+                                    "width": "90px", "marginRight": "12px",
+                                },
+                            ),
+                            html.Button(
+                                "BUY",
+                                id="manual-buy-btn",
+                                n_clicks=0,
+                                style={
+                                    "backgroundColor": "#00C805", "color": "#000000",
+                                    "border": "none", "padding": "8px 16px",
+                                    "borderRadius": "4px", "fontFamily": "Inter, sans-serif",
+                                    "fontWeight": "700", "fontSize": "12px",
+                                    "cursor": "pointer", "marginRight": "8px",
+                                },
+                            ),
+                            html.Button(
+                                "SELL",
+                                id="manual-sell-btn",
+                                n_clicks=0,
+                                style={
+                                    "backgroundColor": "#FF3B30", "color": "#FFFFFF",
+                                    "border": "none", "padding": "8px 16px",
+                                    "borderRadius": "4px", "fontFamily": "Inter, sans-serif",
+                                    "fontWeight": "700", "fontSize": "12px",
+                                    "cursor": "pointer", "marginRight": "8px",
+                                },
+                            ),
+                            html.Button(
+                                "⚡ EMERGENCY SELL (FLATTEN)",
+                                id="manual-emergency-sell-btn",
+                                n_clicks=0,
+                                style={
+                                    "backgroundColor": "#D32F2F", "color": "#FFFFFF",
+                                    "border": "none", "padding": "8px 16px",
+                                    "borderRadius": "4px", "fontFamily": "Inter, sans-serif",
+                                    "fontWeight": "700", "fontSize": "12px",
+                                    "cursor": "pointer",
+                                },
+                            ),
+                        ],
+                        style={"display": "flex", "alignItems": "center", "flexWrap": "wrap"},
+                    ),
+                    html.Div(
+                        id="order-feedback-status",
+                        children="",
+                        style={
+                            "color": colors.TEXT_PRIMARY,
+                            "fontFamily": colors.FONT_MONO, "fontSize": "12px",
+                            "marginTop": "8px", "minHeight": "18px",
+                        },
+                    ),
+                ],
+            ),
         ],
         style={
             "backgroundColor": colors.BACKGROUND_CARD,

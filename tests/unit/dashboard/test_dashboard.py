@@ -5,6 +5,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch, MagicMock
 from typing import List
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", "src"))
@@ -1120,6 +1121,36 @@ class TestSessionStatusLoader(unittest.TestCase):
     def test_write_session_command_rejects_invalid_action(self):
         from investment_agent.dashboard import data_loader
         self.assertFalse(data_loader.write_session_command("nuke"))
+
+
+class TestOrderAndSessionCallback(unittest.TestCase):
+    @patch("investment_agent.execution.execution.place_order")
+    def test_handle_order_actions_buy(self, mock_place):
+        from investment_agent.dashboard import app as dash_app
+        mock_result = MagicMock(submitted=True, status="filled", order_id="ord-99")
+        mock_place.return_value = mock_result
+
+        with patch("investment_agent.dashboard.app.ctx") as mock_ctx:
+            mock_ctx.triggered_id = "manual-buy-btn"
+            msg = dash_app._handle_order_and_session_actions(
+                0, 0, 0, 1, 0, 0, "AAPL", 2, 150.0
+            )
+            self.assertIn("BUY SUCCESS", msg)
+            self.assertIn("ord-99", msg)
+            mock_place.assert_called_once_with("AAPL", "buy", 2.0, 150.0)
+
+    @patch("investment_agent.execution.execution.cancel_all_orders_and_close_positions")
+    def test_handle_emergency_sell_flatten(self, mock_flatten):
+        from investment_agent.dashboard import app as dash_app
+        mock_flatten.return_value = {"cancelled_orders": 2, "closed_positions": 1}
+
+        with patch("investment_agent.dashboard.app.ctx") as mock_ctx:
+            mock_ctx.triggered_id = "manual-emergency-sell-btn"
+            msg = dash_app._handle_order_and_session_actions(
+                0, 0, 0, 0, 0, 1, "AAPL", 1, 150.0
+            )
+            self.assertIn("EMERGENCY SELL", msg)
+            self.assertIn("closed 1 open positions", msg)
 
 
 if __name__ == "__main__":

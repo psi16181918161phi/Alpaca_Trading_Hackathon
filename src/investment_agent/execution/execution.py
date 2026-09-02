@@ -354,6 +354,35 @@ def get_account_snapshot(custom_baseline_path: Optional[str] = None) -> Dict[str
     return snap
 
 
+def cancel_all_orders_and_close_positions() -> Dict[str, Any]:
+    """Emergency operation: cancel open orders and close open positions.
+
+    Returns a dict with ok=True and count of cancelled orders & closed positions.
+    """
+    client = _get_trading_client()
+    cancelled_count = 0
+    closed_count = 0
+
+    try:
+        res = client.cancel_orders()
+        cancelled_count = len(res) if isinstance(res, list) else 0
+    except Exception as exc:
+        print(f"Warning: cancel_orders failed or no orders: {exc}")
+
+    try:
+        res = client.close_all_positions(cancel_orders=True)
+        closed_count = len(res) if isinstance(res, list) else 0
+    except Exception as exc:
+        print(f"Warning: close_all_positions failed or no positions: {exc}")
+
+    return {
+        "ok": True,
+        "cancelled_orders": cancelled_count,
+        "closed_positions": closed_count,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 if __name__ == "__main__":
     print(get_account_summary())
     contract = get_option_contract("AAPL")

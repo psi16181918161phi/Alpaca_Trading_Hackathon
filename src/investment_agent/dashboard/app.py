@@ -43,7 +43,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Dict
 
-from dash import Dash, Input, Output, dcc, html
+from dash import Dash, Input, Output, State, ctx, dcc, html
 
 from . import charts, colors, data_loader, layout
 
@@ -217,41 +217,78 @@ DEFAULT_SESSION_PARAMS: Dict[str, Any] = {
 
 
 @app.callback(
-    Output("session-start-btn", "n_clicks"),
+    Output("order-feedback-status", "children"),
     Input("session-start-btn", "n_clicks"),
-    prevent_initial_call=True,
-)
-def _on_session_start(n_clicks):
-    if not n_clicks:
-        return 0
-    data_loader.write_session_command(
-        "start", params=DEFAULT_SESSION_PARAMS,
-    )
-    return n_clicks
-
-
-@app.callback(
-    Output("session-stop-btn", "n_clicks"),
     Input("session-stop-btn", "n_clicks"),
-    prevent_initial_call=True,
-)
-def _on_session_stop(n_clicks):
-    if not n_clicks:
-        return 0
-    data_loader.write_session_command("stop")
-    return n_clicks
-
-
-@app.callback(
-    Output("session-emergency-btn", "n_clicks"),
     Input("session-emergency-btn", "n_clicks"),
+    Input("manual-buy-btn", "n_clicks"),
+    Input("manual-sell-btn", "n_clicks"),
+    Input("manual-emergency-sell-btn", "n_clicks"),
+    State("manual-symbol-input", "value"),
+    State("manual-qty-input", "value"),
+    State("manual-price-input", "value"),
     prevent_initial_call=True,
 )
-def _on_session_emergency(n_clicks):
-    if not n_clicks:
-        return 0
-    data_loader.write_session_command("emergency_stop")
-    return n_clicks
+def _handle_order_and_session_actions(
+    start_clicks, stop_clicks, emergency_clicks,
+    buy_clicks, sell_clicks, manual_emergency_clicks,
+    symbol, qty, price,
+):
+    try:
+        button_id = ctx.triggered_id
+    except Exception:
+        button_id = None
+    if not button_id:
+        return ""
+
+    if button_id == "session-start-btn":
+        data_loader.write_session_command("start", params=DEFAULT_SESSION_PARAMS)
+        return "[SYSTEM] Paper trading session START command issued successfully."
+
+    elif button_id == "session-stop-btn":
+        data_loader.write_session_command("stop")
+        return "[SYSTEM] Session STOP command issued successfully."
+
+    elif button_id == "session-emergency-btn":
+        data_loader.write_session_command("emergency_stop")
+        try:
+            from investment_agent.execution.execution import cancel_all_orders_and_close_positions
+            res = cancel_all_orders_and_close_positions()
+            return f"[ALERT] EMERGENCY STOP issued! Cancelled {res.get('cancelled_orders', 0)} orders, closed {res.get('closed_positions', 0)} positions."
+        except Exception as exc:
+            return f"[ALERT] EMERGENCY STOP command written (Broker cleanup note: {exc})"
+
+    elif button_id in ("manual-buy-btn", "manual-sell-btn"):
+        side = "buy" if button_id == "manual-buy-btn" else "sell"
+        sym = (symbol or "AAPL").upper().strip()
+        try:
+            q = float(qty) if qty is not None else 1.0
+        except (TypeError, ValueError):
+            q = 1.0
+        try:
+            p = float(price) if price is not None else 150.0
+        except (TypeError, ValueError):
+            p = 150.0
+
+        try:
+            from investment_agent.execution.execution import place_order
+            res = place_order(sym, side, q, p)
+            if res.submitted:
+                return f"[{side.upper()} SUCCESS] {side.upper()} {q:g}x {sym} -> Status: {res.status}, Order ID: {res.order_id}"
+            else:
+                return f"[{side.upper()} BLOCKED] {res.reason}"
+        except Exception as exc:
+            return f"[{side.upper()} ERROR] Failed to place order: {exc}"
+
+    elif button_id == "manual-emergency-sell-btn":
+        try:
+            from investment_agent.execution.execution import cancel_all_orders_and_close_positions
+            res = cancel_all_orders_and_close_positions()
+            return f"[EMERGENCY SELL] Flatten completed! Cancelled {res.get('cancelled_orders', 0)} open orders, closed {res.get('closed_positions', 0)} open positions."
+        except Exception as exc:
+            return f"[EMERGENCY SELL ERROR] {exc}"
+
+    return ""
 
 
 @app.callback(
