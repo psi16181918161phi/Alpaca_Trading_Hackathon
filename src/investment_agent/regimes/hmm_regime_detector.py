@@ -265,6 +265,65 @@ class HMMRegimeDetector:
             is_confident=result.is_confident,
         )
 
+    def classify_sequence(self, features: List[List[float]]) -> List[RegimeProbability]:
+        """Classify a sequence of observations returning per-bar posterior probabilities.
+
+        Unlike classify() which returns a single RegimeProbability for the final bar,
+        classify_sequence() performs forward-backward smoothing over the full sequence
+        and returns a RegimeProbability for *every* historical bar t, containing bar t's
+        true posterior probability distribution P(S_t | O_{1:T}).
+
+        Parameters
+        ----------
+        features : List[List[float]]
+            N x 7 feature matrix.
+
+        Returns
+        -------
+        List[RegimeProbability]
+            List of length N containing per-bar regime probabilities and Viterbi assignments.
+        """
+        obs = np.array(features, dtype=np.float64)
+        if obs.ndim != 2 or obs.shape[1] != 7:
+            raise ValueError(f"Expected N x 7 feature matrix, got shape {obs.shape}")
+
+        obs_standardized = (obs - self._calibration_means) / self._calibration_stds
+        obs_standardized = np.clip(obs_standardized, -4.0, 4.0)
+
+        gamma, _, _, _ = self._impl._inference.forward_backward(obs_standardized)
+        viterbi_path = self._impl._inference.enforce_dwell_time(
+            self._impl._inference.viterbi(obs_standardized)
+        )
+
+        dwell_times = self._config.get("min_dwell_bars", {})
+
+        sequence: List[RegimeProbability] = []
+        for t in range(obs.shape[0]):
+            p_t = gamma[t, :].copy()
+            p_t_clipped = np.maximum(p_t, 1e-300)
+            p_t_clipped /= p_t_clipped.sum()
+
+            entropy = -float(np.sum(p_t_clipped * np.log(p_t_clipped)))
+            normalized_entropy = entropy / math.log(N_STATES)
+            is_confident = normalized_entropy < 0.5
+
+            probs = {f"R{i + 1:02d}": float(p_t[i]) for i in range(N_STATES)}
+            regime_t = viterbi_path[t]
+            dwell_time = dwell_times.get(regime_t, MIN_DWELL_BARS)
+
+            sequence.append(
+                RegimeProbability(
+                    regime=regime_t,
+                    probabilities=probs,
+                    entropy=entropy,
+                    normalized_entropy=normalized_entropy,
+                    dwell_time=dwell_time,
+                    is_confident=is_confident,
+                )
+            )
+
+        return sequence
+
     def get_transition_matrix(self) -> np.ndarray:
         """Return the current HMM transition matrix."""
         return self._impl._params.transition_matrix.copy()

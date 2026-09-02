@@ -56,6 +56,9 @@ class HMMValidationReport:
     log_loss : float
         Average log-loss (cross-entropy) per bar. Lower is better.
         Perfectly calibrated classifier = H(p_true).
+    is_empirical_ground_truth : bool
+        True if Brier/log-loss evaluated against independent ground truth;
+        False if evaluated against Viterbi MAP fallback.
     regime_counts : Dict[str, int]
         How many bars the Viterbi decoder assigned to each regime.
     empirical_transition_matrix : Dict[str, Dict[str, float]]
@@ -72,6 +75,7 @@ class HMMValidationReport:
     brier_score: float = 0.0
     brier_score_per_regime: Dict[str, float] = field(default_factory=dict)
     log_loss: float = 0.0
+    is_empirical_ground_truth: bool = False
     regime_counts: Dict[str, int] = field(default_factory=dict)
     empirical_transition_matrix: Dict[str, Dict[str, float]] = field(default_factory=dict)
     transition_divergence: Dict[str, float] = field(default_factory=dict)
@@ -88,6 +92,7 @@ def validate_hmm(
     regimes: List[str],
     probabilities: List[Dict[str, float]],
     *,
+    realized_ground_truth: Optional[List[str]] = None,
     calibration_means: Optional[List[float]] = None,
     calibration_stds: Optional[List[float]] = None,
     configured_transition_matrix: Optional[Dict[str, Dict[str, float]]] = None,
@@ -103,16 +108,18 @@ def validate_hmm(
         Viterbi-decoded regime label for each bar — the MAP hard assignment.
     probabilities : List[Dict[str, float]]
         Full posterior probability dict for each bar (sums to 1.0).
+    realized_ground_truth : optional List[str]
+        Independent realized ground truth regime labels (e.g., forward realized market outcomes).
+        When provided, Brier score and log-loss measure true empirical calibration rather than
+        circular Viterbi agreement.
     calibration_means : optional List[float]
-        Calibration means used for standardization (7-element). When
-        provided, feature drift is measured against these anchors.
+        Calibration means used for standardization (7-element).
     calibration_stds : optional List[float]
         Calibration std-devs (7-element).
     configured_transition_matrix : optional Dict[str, Dict[str, float]]
-        The A matrix from regimes.toml. When provided, KL divergence
-        between empirical and configured transitions is computed.
+        The A matrix from regimes.toml.
     feature_names : optional List[str]
-        Names for each of the 7 features (for readability only).
+        Names for each of the 7 features.
 
     Returns
     -------
@@ -135,6 +142,17 @@ def validate_hmm(
         "RSI", "MACD", "ATR", "VIX_proxy", "VolRatio", "Corr", "Hurst"
     ]
 
+    # Determine ground-truth source
+    if realized_ground_truth and len(realized_ground_truth) >= n:
+        targets = realized_ground_truth[:n]
+        report.is_empirical_ground_truth = True
+    else:
+        targets = regimes[:n]
+        report.is_empirical_ground_truth = False
+        report.warnings.append(
+            "Brier score computed against Viterbi MAP fallback (no independent ground truth provided)."
+        )
+
     # ------------------------------------------------------------------
     # 1. Regime counts
     # ------------------------------------------------------------------
@@ -142,18 +160,16 @@ def validate_hmm(
         report.regime_counts[reg] = report.regime_counts.get(reg, 0) + 1
 
     # ------------------------------------------------------------------
-    # 2. Brier score
+    # 2. Non-circular Brier score
     # ------------------------------------------------------------------
-    # We treat each bar's MAP regime as the "true" label (one-hot).
-    # Brier = (1/N) * sum_t sum_r (p(r|t) - 1{r == viterbi_r_t})^2
     all_regimes = sorted(
-        {r for d in probabilities[:n] for r in d} | set(regimes[:n])
+        {r for d in probabilities[:n] for r in d} | set(regimes[:n]) | set(targets)
     )
     total_brier = 0.0
     per_regime_brier: Dict[str, List[float]] = {r: [] for r in all_regimes}
 
     for i in range(n):
-        true_regime = regimes[i]
+        true_regime = targets[i]
         probs = probabilities[i]
         brier_t = 0.0
         for r in all_regimes:
@@ -185,7 +201,7 @@ def validate_hmm(
     eps = 1e-12
     total_ll = 0.0
     for i in range(n):
-        true_regime = regimes[i]
+        true_regime = targets[i]
         p_true = max(eps, probabilities[i].get(true_regime, eps))
         total_ll += math.log(p_true)
     report.log_loss = -total_ll / n
@@ -280,8 +296,12 @@ def validate_from_detector(
     volumes: Optional[List[float]] = None,
     highs: Optional[List[float]] = None,
     lows: Optional[List[float]] = None,
+    forward_window: int = 5,
 ) -> HMMValidationReport:
-    """End-to-end convenience: extract features, run HMM, then validate.
+    """End-to-end convenience: extract features, run per-bar HMM inference, and validate.
+
+    Computes per-bar posterior distributions across history via classify_sequence() and
+    evaluates Brier calibration against realized forward return outcome archetypes.
 
     Parameters
     ----------
@@ -291,6 +311,8 @@ def validate_from_detector(
         Volume series.
     highs / lows : optional List[float]
         Used for true-range ATR.
+    forward_window : int
+        Lookahead window (bars) to evaluate realized forward price return outcomes.
 
     Returns
     -------
@@ -301,30 +323,39 @@ def validate_from_detector(
 
     detector = HMMRegimeDetector()
     feat_matrix = extract_features(prices, volumes, highs=highs, lows=lows, lookback_days=20)
+    feat_list = feat_matrix.tolist()
 
-    # Run bar-by-bar to get per-bar regime sequence and probabilities
-    regimes: List[str] = []
-    probabilities: List[Dict[str, float]] = []
+    # Per-bar forward-backward smoothing sequence
+    sequence = detector.classify_sequence(feat_list)
+    regimes = [rp.regime for rp in sequence]
+    probabilities = [rp.probabilities for rp in sequence]
 
-    # Full pass (single inference over entire window)
-    result = detector.classify(feat_matrix.tolist())
-    history = detector.get_history()
+    # Compute independent ground-truth targets from realized forward price returns
+    n = len(sequence)
+    realized_targets: List[str] = []
+    price_len = len(prices)
+    # Match price indices to feature row count
+    offset = max(0, price_len - n)
 
-    if history:
-        for h in history:
-            regimes.append(h.regime)
-            # Build probability dict from the last result's posterior
-            # (history object carries the final posterior; individual bars not stored)
-            probabilities.append(result.probabilities)
-    else:
-        # Fallback: single observation
-        regimes = [result.regime]
-        probabilities = [result.probabilities]
+    for i in range(n):
+        price_idx = offset + i
+        if price_idx + forward_window < price_len:
+            fwd_ret = (prices[price_idx + forward_window] - prices[price_idx]) / prices[price_idx]
+            if fwd_ret > 0.01:
+                realized_targets.append("R01")  # Bullish trend
+            elif fwd_ret < -0.01:
+                realized_targets.append("R02")  # Bearish trend
+            else:
+                realized_targets.append("R05")  # Neutral
+        else:
+            # Fallback to current bar's Viterbi assignment when forward price window unavailable
+            realized_targets.append(regimes[i])
 
     return validate_hmm(
-        features=feat_matrix.tolist(),
+        features=feat_list,
         regimes=regimes,
         probabilities=probabilities,
+        realized_ground_truth=realized_targets,
         calibration_means=detector._calibration_means.tolist(),
         calibration_stds=detector._calibration_stds.tolist(),
     )

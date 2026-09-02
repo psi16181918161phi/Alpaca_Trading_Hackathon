@@ -244,8 +244,13 @@ def main() -> int:
     confidence = 1.0 - regime.normalized_entropy
     print(f"[3] Regime (HMM Authoritative): {regime.regime} (confidence={confidence:.2f})")
 
-    # Retrieve past memories if available
+    # Retrieve past memories & run restart recovery sweep on pending orders
+    from investment_agent.execution.fill_reconciler import FillReconciler
     tm = TradeMemory(args.memory)
+    reconciler = FillReconciler(verbose=True)
+    rec_counts = reconciler.recover_pending_orders(tm)
+    print(f"[3.1] Startup Pending Order Recovery: {rec_counts}")
+
     memories = []
     try:
         dummy_exp = TradeExperience(
@@ -342,17 +347,26 @@ def main() -> int:
     except Exception as e:
         print(f"WARN: failed to persist reputation: {e}", file=sys.stderr)
 
-    # 8. Optional: submit paper order.
+    # 8. Optional: submit paper order & run broker reconciliation.
     if args.no_execute or (not args.live and not is_live):
         print("[8] Skipping execution (offline mode or --no-execute).")
         return 0
-    result = _maybe_execute(
+    exec_res = _maybe_execute(
         product=pg_result.product, symbol=args.symbol,
         action=experience.position_action, quantity=experience.quantity,
         live=args.live and is_live,
         option_side=pg_result.option_side,
     )
-    print(f"[8] Execution: {json.dumps(result, default=str)}")
+    print(f"[8] Execution: {json.dumps(exec_res, default=str)}")
+    if exec_res.get("submitted") and "order" in exec_res:
+        order_obj = exec_res["order"]
+        order_id = getattr(order_obj, "order_id", None) or getattr(order_obj, "id", None)
+        if order_id is None and hasattr(order_obj, "get"):
+            order_id = order_obj.get("order_id") or order_obj.get("id")
+        if order_id:
+            tm.update_experience(experience.decision_id, order_id=order_id)
+            reconciliation = reconciler.reconcile(tm)
+            print(f"[8.1] Post-Execution Broker Reconciliation: {reconciliation}")
     return 0
 
 

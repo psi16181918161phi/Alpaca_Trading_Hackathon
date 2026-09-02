@@ -926,7 +926,7 @@ class XQuantXOrchestrator:
         # In production, this would use account buying power
         return max(0.0, min(1.0, effective_cap))
 
-    def _execute_order(self, decision: TradingDecision) -> Optional[Dict[str, Any]]:
+    def _execute_order(self, decision: TradingDecision) -> Optional[Any]:
         """Execute trading decision via Alpaca (if enabled)."""
         if not self._enable_trading:
             return None
@@ -936,12 +936,13 @@ class XQuantXOrchestrator:
 
         try:
             from investment_agent.execution.execution import place_order, get_account_summary
-            account = get_account_summary()
+            price = float(getattr(decision, "price", 100.0) or 100.0)
             return place_order(
                 symbol=decision.symbol,
                 side=decision.action.lower(),
                 qty=int(decision.quantity) if decision.quantity > 0 else 0,
-                price_per_contract=0.0,
+                price_per_share=price,
+                is_option=False,
             )
         except Exception as e:
             return {"error": str(e)}
@@ -954,7 +955,7 @@ class XQuantXOrchestrator:
         capital_gate: CapitalGateResult,
         decision: TradingDecision,
         agent_outputs: List[AgentOutput],
-        order_result: Optional[Dict[str, Any]],
+        order_result: Optional[Any],
         investment_kalman_gain: float,
         agent_weights: Optional[Dict[str, float]] = None,
         agent_outputs_full: Optional[Dict[str, Dict[str, float]]] = None,
@@ -986,11 +987,16 @@ class XQuantXOrchestrator:
         elif isinstance(order_result, dict) and "error" in order_result:
             status = TradeLifecycle.REJECTED.value
             order_id = None
+        elif hasattr(order_result, "reason") and getattr(order_result, "reason") and not getattr(order_result, "submitted", True):
+            status = TradeLifecycle.REJECTED.value
+            order_id = getattr(order_result, "order_id", None)
         else:
             status = TradeLifecycle.PENDING_FILL.value
-            order_id = None
-            if isinstance(order_result, dict):
-                order_id = order_result.get("id")
+            order_id = getattr(order_result, "order_id", None) or getattr(order_result, "id", None)
+            if order_id is None and isinstance(order_result, dict):
+                order_id = order_result.get("order_id") or order_result.get("id")
+            elif order_id is None and hasattr(order_result, "get"):
+                order_id = order_result.get("order_id") or order_result.get("id")
 
         experience = TradeExperience(
             decision_id=decision.decision_id,

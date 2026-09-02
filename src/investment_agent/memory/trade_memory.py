@@ -245,6 +245,10 @@ class TradeExperience:
     order_id: Optional[str] = None
     fill_price: Optional[float] = None
     closed_at: Optional[datetime] = None
+    # Execution accounting fields for partial fills
+    ordered_qty: Optional[float] = None     # Requested order quantity
+    filled_qty: Optional[float] = None      # Actual cumulative filled quantity
+    remaining_qty: Optional[float] = None   # Remaining unfilled order quantity
     # Authoritative Kalman/ensemble provenance (added for P0 dashboard fixes).
     # These are the production-truth values written by the orchestrator at
     # decision time; the dashboard reads them directly rather than
@@ -385,6 +389,9 @@ class TradeMemory:
             "order_id": exp.order_id,
             "fill_price": exp.fill_price,
             "closed_at": exp.closed_at.isoformat() if exp.closed_at else None,
+            "ordered_qty": exp.ordered_qty if exp.ordered_qty is not None else exp.quantity,
+            "filled_qty": exp.filled_qty if exp.filled_qty is not None else (exp.quantity if exp.lifecycle_status in ("OPEN", "CLOSED") else 0.0),
+            "remaining_qty": exp.remaining_qty if exp.remaining_qty is not None else max(0.0, (exp.ordered_qty or exp.quantity) - (exp.filled_qty or (exp.quantity if exp.lifecycle_status in ("OPEN", "CLOSED") else 0.0))),
             "kalman_prior": exp.kalman_prior,
             "kalman_observation": exp.kalman_observation,
             "investment_kalman_gain": exp.investment_kalman_gain,
@@ -404,6 +411,11 @@ class TradeMemory:
         agent_outputs_full = (
             {k: dict(v) for k, v in aof_raw.items()} if isinstance(aof_raw, dict) else None
         )
+        qty = raw.get("quantity", 0.0)
+        status = raw.get("lifecycle_status", "CLOSED")
+        ordered_qty = raw.get("ordered_qty", qty)
+        filled_qty = raw.get("filled_qty", qty if status in ("OPEN", "CLOSED") else 0.0)
+        remaining_qty = raw.get("remaining_qty", max(0.0, ordered_qty - filled_qty))
         return TradeExperience(
             decision_id=raw.get("decision_id", ""),
             timestamp=datetime.fromisoformat(raw["timestamp"]),
@@ -421,16 +433,19 @@ class TradeMemory:
             effective_cap=raw.get("effective_cap", 0.0),
             state_charges=raw.get("state_charges", {}),
             position_action=raw.get("position_action", "HOLD"),
-            quantity=raw.get("quantity", 0.0),
+            quantity=qty,
             confidence=raw.get("confidence", 0.0),
             expected_outcome=raw.get("expected_outcome", ""),
             realized_outcome=raw.get("realized_outcome", ""),
             pnl=raw.get("pnl", 0.0),
             lesson=raw.get("lesson", ""),
-            lifecycle_status=raw.get("lifecycle_status", "CLOSED"),
+            lifecycle_status=status,
             order_id=raw.get("order_id"),
             fill_price=raw.get("fill_price"),
             closed_at=closed_at,
+            ordered_qty=ordered_qty,
+            filled_qty=filled_qty,
+            remaining_qty=remaining_qty,
             kalman_prior=raw.get("kalman_prior"),
             kalman_observation=raw.get("kalman_observation"),
             investment_kalman_gain=raw.get("investment_kalman_gain"),

@@ -151,30 +151,41 @@ class FillReconciler:
                 continue
 
             if broker_status == "filled":
+                orig_qty = exp.ordered_qty or exp.quantity
+                final_fill_qty = filled_qty if filled_qty > 0 else orig_qty
                 memory.update_experience(
                     exp.decision_id,
                     lifecycle_status=TradeLifecycle.OPEN.value,
                     fill_price=fill_price,
-                    quantity=filled_qty if filled_qty > 0 else exp.quantity,
+                    quantity=final_fill_qty,
+                    ordered_qty=orig_qty,
+                    filled_qty=final_fill_qty,
+                    remaining_qty=0.0,
                 )
                 counts["filled"] += 1
                 if self._verbose:
                     print(
                         f"[{tag}] {exp.order_id[:8]} FILLED "
-                        f"qty={filled_qty} @ ${fill_price:.4f}"
+                        f"qty={final_fill_qty} @ ${fill_price:.4f}"
                     )
 
             elif broker_status == "partially_filled":
+                orig_qty = exp.ordered_qty or exp.quantity
+                actual_filled = filled_qty if filled_qty > 0 else exp.quantity
+                remaining = max(0.0, orig_qty - actual_filled)
                 memory.update_experience(
                     exp.decision_id,
                     fill_price=fill_price,
-                    quantity=filled_qty if filled_qty > 0 else exp.quantity,
+                    quantity=actual_filled,
+                    ordered_qty=orig_qty,
+                    filled_qty=actual_filled,
+                    remaining_qty=remaining,
                 )
                 counts["partially_filled"] += 1
                 if self._verbose:
                     print(
                         f"[{tag}] {exp.order_id[:8]} PARTIAL "
-                        f"qty={filled_qty}/{exp.quantity} @ ${fill_price:.4f}"
+                        f"filled={actual_filled}/ordered={orig_qty} (rem={remaining}) @ ${fill_price:.4f}"
                     )
 
             elif broker_status in ("rejected",):
