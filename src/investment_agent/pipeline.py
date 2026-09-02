@@ -207,75 +207,38 @@ class XQuantXPipeline:
         )
         self._kalman_filter = KalmanFilter(initial_price=kalman_initial_price)
         self._regime_history: List[Tuple[datetime, str]] = []
-        self._use_hmm = use_hmm
-        self._hmm_detector: Optional[HMMRegimeDetector] = None
-        if use_hmm:
-            self._hmm_detector = HMMRegimeDetector()
+        self._use_hmm = True  # HMM is always authoritative
+        self._hmm_detector: Optional[HMMRegimeDetector] = HMMRegimeDetector()
 
     def classify_regime(
         self,
         prices: List[float],
         volumes: Optional[List[float]] = None,
+        highs: Optional[List[float]] = None,
+        lows: Optional[List[float]] = None,
     ) -> RegimeClassification:
-        """Classify active market regime from price/volume history.
-
-        Parameters
-        ----------
-        prices : List[float]
-            Historical price series (oldest first).
-        volumes : Optional[List[float]]
-            Historical volume series (oldest first). Must align exactly with prices.
-
-        Returns
-        -------
-        RegimeClassification
-            Active regime classification.
-        
-        Raises
-        ------
-        HMMUnderflowError
-            If HMM inference encounters numerical underflow (only when use_hmm=True).
-        ValueError
-            If HMM is enabled but not initialized, or if feature extraction fails.
-        """
-        if self._use_hmm:
-            if self._hmm_detector is None:
-                raise ValueError(
-                    "HMM regime detector requested but not initialized. "
-                    "Check config/regimes.toml exists and is valid."
-                )
-            
-            # Extract features for HMM
-            from investment_agent.regimes.market_feature_extractor import extract_features
-            features = extract_features(prices, volumes, lookback_days=self._regime_detector._lookback_days)
-            
-            # Run HMM inference
-            hmm_result = self._hmm_detector.classify(features.tolist())
-            
-            # Convert HMM result to RegimeClassification (adapter)
-            regime_result = RegimeClassification(
-                regime=hmm_result.regime,
-                confidence=1.0 - hmm_result.normalized_entropy,  # Map entropy to confidence
-                timestamp=hmm_result.timestamp,
-                features={
-                    "rsi": float(np.mean(features[:, 0])),
-                    "macd": float(np.mean(features[:, 1])),
-                    "atr": float(np.mean(features[:, 2])),
-                    "vix": float(np.mean(features[:, 3])),
-                    "vol_ratio": float(np.mean(features[:, 4])),
-                    "corr": float(np.mean(features[:, 5])),
-                    "hurst": float(np.mean(features[:, 6])),
-                },
-                regime_affinity=hmm_result.probabilities,
-            )
-            
-            self._regime_history.append((datetime.now(), regime_result.regime))
-            return regime_result
-        
-        # Rule-based detector fallback
-        result = self._regime_detector.classify(prices, volumes)
-        self._regime_history.append((datetime.now(), result.regime))
-        return result
+        """Classify active market regime from OHLCV history using HMM (always authoritative)."""
+        from investment_agent.regimes.market_feature_extractor import extract_features
+        features = extract_features(prices, volumes, highs=highs, lows=lows,
+                                    lookback_days=self._regime_detector._lookback_days)
+        hmm_result = self._hmm_detector.classify(features.tolist())
+        regime_result = RegimeClassification(
+            regime=hmm_result.regime,
+            confidence=1.0 - hmm_result.normalized_entropy,
+            timestamp=hmm_result.timestamp,
+            features={
+                "rsi": float(np.mean(features[:, 0])),
+                "macd": float(np.mean(features[:, 1])),
+                "atr": float(np.mean(features[:, 2])),
+                "vix": float(np.mean(features[:, 3])),
+                "vol_ratio": float(np.mean(features[:, 4])),
+                "corr": float(np.mean(features[:, 5])),
+                "hurst": float(np.mean(features[:, 6])),
+            },
+            regime_affinity=hmm_result.probabilities,
+        )
+        self._regime_history.append((datetime.now(), regime_result.regime))
+        return regime_result
 
     def get_regime_weights(self, regime: str) -> Dict[str, float]:
         """Get per-agent reputation weights for a specific regime.

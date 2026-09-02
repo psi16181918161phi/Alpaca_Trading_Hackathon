@@ -70,6 +70,7 @@ def _build_orchestrator(tmpdir: str, reputation_file: Path) -> XQuantXOrchestrat
         use_hmm=False,
         enable_trading=False,
         memory_file=str(Path(tmpdir) / "mem.json"),
+        reputation_file=str(reputation_file),
     )
 
 

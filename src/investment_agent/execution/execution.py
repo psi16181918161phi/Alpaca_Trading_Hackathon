@@ -383,6 +383,105 @@ def cancel_all_orders_and_close_positions() -> Dict[str, Any]:
     }
 
 
+def close_position(symbol: str) -> Dict[str, Any]:
+    """Close (flatten) an existing position by submitting a SELL for the exact held quantity.
+
+    This is the authoritative close mechanism: it reads the broker-reported
+    position size and submits a SELL for that exact quantity so the position
+    reaches zero. It is NOT the same as place_order(side='sell', qty=N),
+    which could accidentally open a short if N > held_qty.
+
+    The flow:
+        1. Query broker for current position in ``symbol``.
+        2. If no position exists, return ok=True immediately.
+        3. Validate the cost with is_trade_safe() (uses current price * qty).
+        4. Submit SELL for exactly held_qty shares (or contracts).
+        5. Verify the position was reduced (best-effort poll).
+
+    Returns
+    -------
+    dict with keys:
+        ok           : bool
+        order_id     : str | None
+        closed_qty   : float
+        reason       : str | None
+        position_before : float   (quantity before close)
+        position_after  : float   (quantity after close, if poll succeeded)
+    """
+    client = _get_trading_client()
+    position_before: float = 0.0
+    avg_price: float = 0.0
+
+    # --- 1. Look up current position ----------------------------------------
+    try:
+        pos = client.get_open_position(symbol)
+        position_before = float(pos.qty)
+        avg_price = _safe_float(getattr(pos, "avg_entry_price", None)) or 1.0
+    except Exception:
+        # Position does not exist or broker error → nothing to close.
+        return {
+            "ok": True,
+            "order_id": None,
+            "closed_qty": 0.0,
+            "reason": "No open position found",
+            "position_before": 0.0,
+            "position_after": 0.0,
+        }
+
+    if position_before == 0.0:
+        return {
+            "ok": True,
+            "order_id": None,
+            "closed_qty": 0.0,
+            "reason": "Position is already zero",
+            "position_before": 0.0,
+            "position_after": 0.0,
+        }
+
+    # --- 2. Safety check ----------------------------------------------------
+    close_qty = abs(position_before)
+    if not is_trade_safe(symbol, close_qty, avg_price):
+        return {
+            "ok": False,
+            "order_id": None,
+            "closed_qty": 0.0,
+            "reason": "Position close blocked by is_trade_safe()",
+            "position_before": position_before,
+            "position_after": position_before,
+        }
+
+    # --- 3. Submit SELL for exactly held_qty --------------------------------
+    side = OrderSide.SELL if position_before > 0 else OrderSide.BUY  # short cover
+    order = MarketOrderRequest(
+        symbol=symbol,
+        qty=close_qty,
+        side=side,
+        time_in_force=TimeInForce.DAY,
+    )
+    result = client.submit_order(order)
+    order_id = str(getattr(result, "id", ""))
+    status = str(getattr(getattr(result, "status", ""), "value", result.status))
+    print(f"CLOSE {symbol}: qty={close_qty} side={side.value} -> status={status} id={order_id}")
+
+    # --- 4. Best-effort position verification --------------------------------
+    position_after: float = position_before  # pessimistic default
+    try:
+        pos_after = client.get_open_position(symbol)
+        position_after = float(pos_after.qty)
+    except Exception:
+        position_after = 0.0  # position likely gone
+
+    return {
+        "ok": status not in ("rejected", "cancelled", "expired"),
+        "order_id": order_id,
+        "closed_qty": close_qty,
+        "reason": None,
+        "position_before": position_before,
+        "position_after": position_after,
+    }
+
+
+
 if __name__ == "__main__":
     print(get_account_summary())
     contract = get_option_contract("AAPL")

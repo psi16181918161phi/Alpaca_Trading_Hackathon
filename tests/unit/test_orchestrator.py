@@ -100,7 +100,8 @@ class TestOrchestrator(unittest.TestCase):
     def setUp(self):
         """Create fresh orchestrator with unique memory file for each test."""
         self.memory_file = f'test_orchestrator_memory_{id(self)}.json'
-        self.orchestrator = XQuantXOrchestrator(agent_ids=AGENT_IDS, symbol='AAPL', use_hmm=False, enable_trading=False, memory_file=self.memory_file)
+        self.rep_file = f'test_orchestrator_rep_{id(self)}.json'
+        self.orchestrator = XQuantXOrchestrator(agent_ids=AGENT_IDS, symbol='AAPL', use_hmm=False, enable_trading=False, memory_file=self.memory_file, reputation_file=self.rep_file)
 
     def tearDown(self):
         """Clean up test memory file."""
@@ -210,12 +211,14 @@ class TestLifecycleAndMemoryFirst(unittest.TestCase):
         self.tmp = tempfile.mkdtemp()
         self.memory_file = os.path.join(self.tmp, "trade_memory.json")
         self.audit_file = os.path.join(self.tmp, "audit_log.jsonl")
+        self.rep_file = os.path.join(self.tmp, "reputation.json")
         self.orchestrator = XQuantXOrchestrator(
             agent_ids=AGENT_IDS,
             symbol="AAPL",
             use_hmm=False,
             enable_trading=False,
             memory_file=self.memory_file,
+            reputation_file=self.rep_file,
         )
         # Override audit log file
         self.orchestrator._audit_log = AuditLog(log_file=self.audit_file)

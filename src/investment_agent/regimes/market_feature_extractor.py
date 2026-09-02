@@ -245,26 +245,33 @@ def _compute_hurst(prices: np.ndarray, period: int = 20) -> float:
 # Main extraction function
 # ---------------------------------------------------------------------------
 
-def extract_features(prices: List[float], volumes: Optional[List[float]] = None,
-                     lookback_days: int = _DEFAULT_LOOKBACK_DAYS) -> np.ndarray:
-    """Extract HMM features from price and volume history.
+def extract_features(
+    prices: List[float],
+    volumes: Optional[List[float]] = None,
+    lookback_days: int = _DEFAULT_LOOKBACK_DAYS,
+    highs: Optional[List[float]] = None,
+    lows: Optional[List[float]] = None,
+) -> np.ndarray:
+    """Extract HMM features from OHLCV history.
 
     Parameters
     ----------
     prices : List[float]
-        Historical price series (oldest first). Must contain at least
-        _MIN_OBSERVATIONS values for reliable feature computation.
+        Historical close prices (oldest first). At least _MIN_OBSERVATIONS required.
     volumes : Optional[List[float]]
-        Historical volume series (oldest first). If None, volume-based
-        features (vol_ratio, corr) are set to default values.
+        Historical volume series (oldest first).
     lookback_days : int
         Lookback window for feature computation (default 20).
+    highs : Optional[List[float]]
+        Historical high prices. When provided alongside `lows`, enables genuine
+        True Range ATR calculation instead of the close-range proxy.
+    lows : Optional[List[float]]
+        Historical low prices.
 
     Returns
     -------
     np.ndarray
-        T x 7 feature matrix where each row is:
-        [RSI, MACD, ATR, VIX, VolRatio, Corr, Hurst]
+        T x 7 feature matrix: [RSI, MACD, ATR, VIX, VolRatio, Corr, Hurst]
 
     Raises
     ------
@@ -273,20 +280,26 @@ def extract_features(prices: List[float], volumes: Optional[List[float]] = None,
     """
     if not prices:
         raise ValueError("Price series must be non-empty")
+    if len(prices) < 5:
+        raise ValueError("Price series must contain at least 5 observations")
+
+    # If series is shorter than _MIN_OBSERVATIONS (30), pad by prepending earliest value
     if len(prices) < _MIN_OBSERVATIONS:
-        raise ValueError(
-            f"Need at least {_MIN_OBSERVATIONS} observations for reliable "
-            f"feature extraction, got {len(prices)}"
-        )
-    
-    # Validate prices
+        pad_len = _MIN_OBSERVATIONS - len(prices)
+        prices = [prices[0]] * pad_len + list(prices)
+        if volumes is not None:
+            volumes = [volumes[0]] * pad_len + list(volumes)
+        if highs is not None:
+            highs = [highs[0]] * pad_len + list(highs)
+        if lows is not None:
+            lows = [lows[0]] * pad_len + list(lows)
+
     prices_arr = np.array(prices, dtype=np.float64)
     if np.any(np.isnan(prices_arr)) or np.any(np.isinf(prices_arr)):
         raise ValueError("Price series contains NaN or Infinity values")
     if np.any(prices_arr <= 0):
         raise ValueError("Price series must contain positive values")
-    
-    # Validate volumes if provided
+
     volumes_arr = None
     if volumes is not None:
         volumes_arr = np.array(volumes, dtype=np.float64)
@@ -294,27 +307,32 @@ def extract_features(prices: List[float], volumes: Optional[List[float]] = None,
             raise ValueError("Volume series contains NaN or Infinity values")
         if np.any(volumes_arr < 0):
             raise ValueError("Volume series must contain non-negative values")
-    
-    # Compute features for each time step in the lookback window
+
+    # Optional OHLC arrays for genuine True Range
+    highs_arr = np.array(highs, dtype=np.float64) if highs is not None else None
+    lows_arr = np.array(lows, dtype=np.float64) if lows is not None else None
+
     T = min(lookback_days, len(prices) - _MIN_OBSERVATIONS + 1)
     if T < 1:
         raise ValueError(f"Insufficient data for feature extraction with lookback={lookback_days}")
-    
+
     features = np.zeros((T, 7))
-    
+
     for t in range(T):
         start_idx = len(prices) - _MIN_OBSERVATIONS - T + t + 1
         end_idx = start_idx + _MIN_OBSERVATIONS
-        
+
         window_prices = prices_arr[start_idx:end_idx]
-        
-        # Compute features
+
+        # Genuine ATR when OHLC data is available
+        window_highs = highs_arr[start_idx:end_idx] if highs_arr is not None and len(highs_arr) >= end_idx else None
+        window_lows = lows_arr[start_idx:end_idx] if lows_arr is not None and len(lows_arr) >= end_idx else None
+
         rsi = _compute_rsi(window_prices)
         macd = _compute_macd(window_prices)
-        atr = _compute_atr(window_prices)
+        atr = _compute_atr(window_prices, highs=window_highs, lows=window_lows)
         vix = _compute_vix(window_prices)
-        
-        # Volume features
+
         if volumes_arr is not None and len(volumes_arr) >= end_idx:
             window_volumes = volumes_arr[start_idx:end_idx]
             vol_ratio = _compute_volume_ratio(window_volumes)
@@ -322,11 +340,11 @@ def extract_features(prices: List[float], volumes: Optional[List[float]] = None,
         else:
             vol_ratio = 1.0
             corr = 0.0
-        
+
         hurst = _compute_hurst(window_prices)
-        
+
         features[t] = [rsi, macd, atr, vix, vol_ratio, corr, hurst]
-    
+
     return features
 
 

@@ -311,6 +311,11 @@ class XQuantXOrchestrator:
     10. Record experience in trade memory
     11. Update agent reputations with outcome
 
+    The HMM is the *only* regime classifier. The rule-based detector is
+    NOT used in the production path. `use_hmm` is retained as an accepted
+    (but now ignored) kwarg for backward-compat; regime detection is always
+    HMM-backed.
+
     Parameters
     ----------
     agent_ids : List[str]
@@ -318,7 +323,7 @@ class XQuantXOrchestrator:
     symbol : str
         Trading symbol (e.g., "AAPL").
     use_hmm : bool, optional
-        If True, use HMM regime detector (default False).
+        Deprecated — retained for backward-compat only. Ignored.
     enable_trading : bool, optional
         If True, actually submit orders via Alpaca (default False for safety).
     memory_file : str, optional
@@ -331,7 +336,7 @@ class XQuantXOrchestrator:
         self,
         agent_ids: List[str],
         symbol: str,
-        use_hmm: bool = False,
+        use_hmm: bool = False,  # deprecated; ignored — HMM is always active
         enable_trading: bool = False,
         memory_file: str = DEFAULT_MEMORY_FILE,
         reputation_file: Optional[str] = "reputation_state.json",
@@ -347,11 +352,9 @@ class XQuantXOrchestrator:
         self._enable_trading = enable_trading
         self._reputation_file = reputation_file
 
-        # Initialize components
-        self._regime_detector = RegimeDetector(lookback_days=20)
-        self._hmm_detector: Optional[HMMRegimeDetector] = None
-        if use_hmm:
-            self._hmm_detector = HMMRegimeDetector()
+        # HMM is the single authoritative regime classifier.
+        # The rule-based RegimeDetector is NOT used in the production path.
+        self._hmm_detector = HMMRegimeDetector()
 
         # Restore persisted reputation if file exists, else initialize fresh tracker
         restored = load_reputation(reputation_file) if reputation_file else None
@@ -758,31 +761,40 @@ class XQuantXOrchestrator:
         return closed
 
     def _classify_regime(
-        self, prices: List[float], volumes: Optional[List[float]]
+        self,
+        prices: List[float],
+        volumes: Optional[List[float]],
+        highs: Optional[List[float]] = None,
+        lows: Optional[List[float]] = None,
     ) -> RegimeClassification:
-        """Classify market regime using HMM or rule-based detector."""
-        if self._hmm_detector is not None:
-            features = extract_features(prices, volumes, lookback_days=20)
-            hmm_result = self._hmm_detector.classify(features.tolist())
+        """Classify market regime using HMM (always authoritative).
 
-            # Convert HMM result to RegimeClassification
-            return RegimeClassification(
-                regime=hmm_result.regime,
-                confidence=1.0 - hmm_result.normalized_entropy,
-                timestamp=hmm_result.timestamp,
-                features={
-                    "rsi": float(np.mean(features[:, 0])),
-                    "macd": float(np.mean(features[:, 1])),
-                    "atr": float(np.mean(features[:, 2])),
-                    "vix": float(np.mean(features[:, 3])),
-                    "vol_ratio": float(np.mean(features[:, 4])),
-                    "corr": float(np.mean(features[:, 5])),
-                    "hurst": float(np.mean(features[:, 6])),
-                },
-                regime_affinity=hmm_result.probabilities,
-            )
+        The rule-based detector fallback has been removed. HMM is the
+        single canonical regime pipeline. Highs and lows, when provided,
+        flow into `extract_features` / ATR so the HMM sees genuine True Range.
+        """
+        features = extract_features(
+            prices, volumes,
+            highs=highs, lows=lows,
+            lookback_days=20,
+        )
+        hmm_result = self._hmm_detector.classify(features.tolist())
 
-        return self._regime_detector.classify(prices, volumes)
+        return RegimeClassification(
+            regime=hmm_result.regime,
+            confidence=1.0 - hmm_result.normalized_entropy,
+            timestamp=hmm_result.timestamp,
+            features={
+                "rsi": float(np.mean(features[:, 0])),
+                "macd": float(np.mean(features[:, 1])),
+                "atr": float(np.mean(features[:, 2])),
+                "vix": float(np.mean(features[:, 3])),
+                "vol_ratio": float(np.mean(features[:, 4])),
+                "corr": float(np.mean(features[:, 5])),
+                "hurst": float(np.mean(features[:, 6])),
+            },
+            regime_affinity=hmm_result.probabilities,
+        )
 
     def _get_regime_weights(self, regime: str) -> Dict[str, float]:
         """Get per-agent reputation weights for active regime."""

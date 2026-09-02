@@ -723,6 +723,7 @@ class TestSevenAgentsAuthoritativeBackedByOrchestrator(unittest.TestCase):
                 use_hmm=False,
                 enable_trading=False,
                 memory_file=mem_file,
+                reputation_file=f"{d}/rep.json",
             )
             agent_outputs = [
                 AgentOutput(s=0.5, c=0.9, u=0.1, d=0.05, p_plus=0.7, p_minus=0.2,

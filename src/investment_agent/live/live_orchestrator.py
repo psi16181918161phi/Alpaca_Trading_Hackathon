@@ -51,7 +51,7 @@ from ..products import ProductGate, ProductGateInput
 from ..products.product_gate import (
     OPTION_CALL, OPTION_PUT, PRODUCT_EQUITY, PRODUCT_NONE, PRODUCT_OPTION,
 )
-from ..regimes.regime_detector import RegimeDetector
+from ..regimes.hmm_regime_detector import HMMRegimeDetector
 from .candidate_screener import CandidateScreener, ScreenResult
 from .circuit_breaker import CircuitBreaker, CircuitLevel, CircuitState
 from .order_state_machine import (
@@ -328,7 +328,15 @@ class LiveOrchestrator:
         # 2. Regime + dynamic 7-State SoC + portfolio risk context.
         prices = bar_ctx["prices"]
         volumes = bar_ctx.get("volumes") or [0.0] * len(prices)
-        regime = RegimeDetector(lookback_days=20).classify(prices, volumes)
+        highs = bar_ctx.get("highs")    # OHLCV: genuine True Range when available
+        lows = bar_ctx.get("lows")
+
+        # HMM is the single authoritative regime classifier — same HMM instance
+        # used by the orchestrator via _classify_regime so the regime is computed
+        # once and shared through the full cycle.
+        regime = self._orch._classify_regime(
+            prices=prices, volumes=volumes, highs=highs, lows=lows
+        )
 
         # Dynamic portfolio metrics from actual open positions & equity
         open_pos_list = self._positions.all_open()
