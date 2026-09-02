@@ -28,11 +28,7 @@
    - Model: `finance-llama-8b`
    - Analyzes equity earnings metrics, valuation ratios, balance sheets, and growth.
 
-6. **Market Microstructure Specialist** (`FEATHERLESS_QWEN_TRADING_KEY`)
-   - Model: `Qwen/Qwen2.5-72B-Instruct` / `Qwen/Qwen2.5-7B-Instruct`
-   - Analyzes order book imbalance, spread dynamics, volume profile, and ATR/RSI volatility.
-
-7. **Sector Specialist** (`FEATHERLESS_DEEPHERMES_KEY`)
+6. **Sector Specialist** (`FEATHERLESS_DEEPHERMES_KEY`)
    - Model: `nousresearch/hermes-3-llama-3.8b`
    - Evaluates sector relative strength, industry tailwinds, and cross-asset correlations.
 
@@ -46,7 +42,6 @@ Configure API credentials in `.env` or `config/llm_keys.json`:
 # LLM Providers (Featherless)
 FEATHERLESS_DEEPHERMES_KEY=your_deephermes_key
 FEATHERLESS_FINANCE_LLAMA_KEY=your_finance_llama_key
-FEATHERLESS_QWEN_TRADING_KEY=your_qwen_trading_key
 FEATHERLESS_RESERVE_KEY=your_reserve_key
 
 # Broker Credentials (Alpaca Paper Trading)
