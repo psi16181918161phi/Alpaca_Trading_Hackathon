@@ -295,6 +295,9 @@ class SessionController:
                     self._start_params.get("symbol_universe", [])),
                 max_lookups_per_interval=int(
                     self._start_params.get("max_lookups_per_interval", 2)),
+                last_cycle_at=None,
+                next_cycle_at=None,
+                stopped_at=None,
             )
             self._thread = threading.Thread(
                 target=self._run_session,
