@@ -84,25 +84,54 @@ def get_option_contract(underlying_symbol, expiration=None, strike=None, option_
     return contracts[0]
 
 
+def _is_option_symbol(symbol: str) -> bool:
+    """Check if a symbol is an OCC formatted option symbol."""
+    if not symbol or len(symbol) <= 6:
+        return False
+    # OCC option symbols are 15+ chars, with strike/expiration digits after ticker
+    return len(symbol) >= 15 and any(c.isdigit() for c in symbol[6:])
+
+
 MAX_POSITION_PCT = 0.05  # never risk more than 5% of buying power on one trade
 
 
-def is_trade_safe(symbol, qty, price_per_contract):
-    if price_per_contract is None or price_per_contract <= 0:
+def is_trade_safe(
+    symbol: str,
+    qty: float,
+    price_per_contract: Optional[float] = None,
+    price_per_share: Optional[float] = None,
+    is_option: Optional[bool] = None,
+) -> bool:
+    price = price_per_share if price_per_share is not None else price_per_contract
+    if price is None or price <= 0:
         print(f"BLOCKED: no valid price for {symbol}, can't verify trade size safely")
         return False
+
+    if is_option is None:
+        is_option = _is_option_symbol(symbol)
+
+    # Options are priced per share, 100 shares per contract. Equity shares multiplier is 1.
+    multiplier = 100.0 if is_option else 1.0
 
     client = _get_trading_client()
     account = client.get_account()
     buying_power = float(account.buying_power)
-    trade_cost = qty * price_per_contract * 100  # options are priced per share, 100 shares per contract
+    trade_cost = qty * price * multiplier
     max_allowed = buying_power * MAX_POSITION_PCT
     if trade_cost > max_allowed:
         print(f"BLOCKED: trade costs ${trade_cost:.2f}, limit is ${max_allowed:.2f}")
         return False
     return True
 
-def place_order(symbol, side, qty, price_per_contract):
+
+def place_order(
+    symbol: str,
+    side: str,
+    qty: float,
+    price_per_contract: Optional[float] = None,
+    price_per_share: Optional[float] = None,
+    is_option: Optional[bool] = None,
+):
     """Place a market order (stock or option symbol) and return an ExecutionResult."""
     s = str(side).strip().lower()
     if s == "buy":
@@ -112,7 +141,8 @@ def place_order(symbol, side, qty, price_per_contract):
     else:
         raise ValueError(f"Invalid order side: {side!r}. Must be 'buy' or 'sell'.")
 
-    if not is_trade_safe(symbol, qty, price_per_contract):
+    price = price_per_share if price_per_share is not None else price_per_contract
+    if not is_trade_safe(symbol, qty, price_per_contract=price_per_contract, price_per_share=price_per_share, is_option=is_option):
         return ExecutionResult(
             submitted=False,
             status="BLOCKED",

@@ -131,6 +131,7 @@ def _maybe_execute(
     quantity: float,
     live: bool,
     option_side: Optional[str] = None,
+    price: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Submit a paper order via Alpaca. Returns the order result envelope.
 
@@ -151,11 +152,13 @@ def _maybe_execute(
             contract = get_option_contract(
                 symbol, option_type=option_side,
             )
+            opt_price = float(contract.close_price or price or 0.0)
             order = place_order(
                 symbol=contract.symbol,
                 side=action.lower(),
                 qty=max(1, int(quantity)),
-                price_per_contract=float(contract.close_price or 0.0),
+                price_per_contract=opt_price,
+                is_option=True,
             )
             return {
                 "submitted": True,
@@ -165,10 +168,13 @@ def _maybe_execute(
                 "option_side": option_side,
             }
         # equity
+        equity_price = float(price if (price is not None and price > 0) else 100.0)
         order = place_order(
-            symbol=symbol, side=action.lower(),
+            symbol=symbol,
+            side=action.lower(),
             qty=int(quantity) if quantity > 0 else 0,
-            price_per_contract=0.0,
+            price_per_share=equity_price,
+            is_option=False,
         )
         return {"submitted": True, "order": order, "product": "equity"}
     except Exception as e:
@@ -213,6 +219,8 @@ def main() -> int:
         return 1
     prices = bars["close"].tolist()
     volumes = bars["volume"].tolist() if "volume" in bars.columns else [0.0] * len(bars)
+    highs = bars["high"].tolist() if "high" in bars.columns else None
+    lows = bars["low"].tolist() if "low" in bars.columns else None
     print(f"[1] Market data: {len(bars)} bars for {args.symbol} "
           f"({bars.index.min().date()} -> {bars.index.max().date()})")
 
@@ -228,10 +236,13 @@ def main() -> int:
     print(f"[2] LLM: {len(agents)} agents ready "
           f"(provider type: {type(provider).__name__})")
 
-    # 3. Regime classification.
-    from investment_agent.regimes.regime_detector import RegimeDetector
-    regime = RegimeDetector(lookback_days=20).classify(prices, volumes)
-    print(f"[3] Regime: {regime.regime} (confidence={regime.confidence:.2f})")
+    # 3. Regime classification (Authoritative HMM detector).
+    from investment_agent.regimes.market_feature_extractor import extract_features
+    from investment_agent.regimes.hmm_regime_detector import HMMRegimeDetector
+    features_matrix = extract_features(prices, volumes, highs=highs, lows=lows, lookback_days=20)
+    regime = HMMRegimeDetector().classify(features_matrix.tolist())
+    confidence = 1.0 - regime.normalized_entropy
+    print(f"[3] Regime (HMM Authoritative): {regime.regime} (confidence={confidence:.2f})")
 
     # Retrieve past memories if available
     tm = TradeMemory(args.memory)
@@ -239,7 +250,7 @@ def main() -> int:
     try:
         dummy_exp = TradeExperience(
             decision_id="preview", timestamp=datetime.now(), symbol=args.symbol,
-            regime=regime.regime, regime_probabilities=dict(regime.regime_affinity),
+            regime=regime.regime, regime_probabilities=dict(regime.probabilities),
             agent_signals={}, ensemble_signal=0.0, disagreement=0.0,
             effective_confidence=0.5, kalman_gain=0.0, kalman_price=0.0, kalman_trend=0.0,
             capital_gate_verdict="PREVIEW", effective_cap=0.0, state_charges={},
@@ -262,7 +273,7 @@ def main() -> int:
     ctx = AgentContext(
         symbol=args.symbol,
         regime=regime.regime,
-        regime_probabilities=dict(regime.regime_affinity),
+        regime_probabilities=dict(regime.probabilities),
         features=features_dict,
         ensemble_signal=0.0,
         disagreement=0.0,
