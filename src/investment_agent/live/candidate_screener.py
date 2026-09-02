@@ -89,7 +89,7 @@ class CandidateScreener:
     momentum_weight: float = 0.4
     volatility_weight: float = 0.3
     volume_weight: float = 0.3
-    min_relative_volume: float = 0.5
+    min_relative_volume: float = 0.0
 
     def screen(
         self, symbol_data: Dict[str, pd.DataFrame]

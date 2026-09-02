@@ -396,10 +396,14 @@ class SessionController:
         try:
             d = (getattr(report, "decisions", []) or [])
             if d:
-                sym = d[-1].get("symbol", "?")
-                act = d[-1].get("action", "HOLD")
-                prod = d[-1].get("product", "none")
-                last_decision = f"{act} {sym} ({prod})"
+                def _fmt(dec):
+                    return f"{dec.get('action', 'HOLD')} {dec.get('symbol', '?')} ({dec.get('product', 'none')})"
+
+                meaningful = [x for x in d if x.get("action") not in ("HOLD", None)]
+                if meaningful:
+                    last_decision = _fmt(meaningful[0])
+                else:
+                    last_decision = _fmt(d[0])
         except Exception:  # noqa: BLE001
             pass
         interval = int(self._start_params.get("decision_interval_seconds", 60))
