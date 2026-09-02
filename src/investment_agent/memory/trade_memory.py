@@ -170,7 +170,9 @@ class TradeExperience:
     timestamp : datetime
         When the trade decision was made.
     symbol : str
-        Trading symbol (e.g., "AAPL", "TSLA").
+        Trading symbol (e.g., "AAPL", "TSLA", "BTC/USD").
+    asset_class : str
+        Asset class: "equity", "option", or "crypto".
     regime : str
         Active regime at time of decision (R01-R12).
     regime_probabilities : Dict[str, float]
@@ -241,6 +243,7 @@ class TradeExperience:
     realized_outcome: str
     pnl: float
     lesson: str
+    asset_class: str = "equity"
     lifecycle_status: str = "PENDING_FILL"
     order_id: Optional[str] = None
     fill_price: Optional[float] = None
@@ -366,6 +369,7 @@ class TradeMemory:
             "decision_id": exp.decision_id,
             "timestamp": exp.timestamp.isoformat(),
             "symbol": exp.symbol,
+            "asset_class": exp.asset_class,
             "regime": exp.regime,
             "regime_probabilities": exp.regime_probabilities,
             "agent_signals": exp.agent_signals,
@@ -420,6 +424,7 @@ class TradeMemory:
             decision_id=raw.get("decision_id", ""),
             timestamp=datetime.fromisoformat(raw["timestamp"]),
             symbol=raw["symbol"],
+            asset_class=raw.get("asset_class", "equity"),
             regime=raw["regime"],
             regime_probabilities=raw.get("regime_probabilities", {}),
             agent_signals=raw.get("agent_signals", {}),
@@ -498,6 +503,7 @@ class TradeMemory:
                     "decision_id": exp.decision_id,
                     "timestamp": exp.timestamp,
                     "symbol": exp.symbol,
+                    "asset_class": exp.asset_class,
                     "regime": exp.regime,
                     "regime_probabilities": exp.regime_probabilities,
                     "agent_signals": exp.agent_signals,

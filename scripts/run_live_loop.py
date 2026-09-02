@@ -292,9 +292,13 @@ def _make_executor(stage: str):
                     "filled_avg_price": float(
                         getattr(result, "filled_avg_price", 0.0) or 0.0),
                 }
-            # equity
-            result = place_order(symbol=symbol, side=side, qty=int(qty),
-                                 price_per_contract=0.0)
+            from investment_agent.utils.asset_class import is_crypto_symbol
+            if is_crypto_symbol(symbol):
+                result = place_order(symbol=symbol, side=side, qty=float(qty),
+                                     price_per_contract=0.0)
+            else:
+                result = place_order(symbol=symbol, side=side, qty=int(qty),
+                                     price_per_contract=0.0)
             return {
                 "id": str(getattr(result, "id", "unknown")),
                 "status": str(getattr(result.status, "value", result.status)),

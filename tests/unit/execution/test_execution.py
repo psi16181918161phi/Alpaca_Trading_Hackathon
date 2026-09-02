@@ -72,6 +72,37 @@ class TestPlaceOrder(unittest.TestCase):
         with self.assertRaises(ValueError):
             execution.place_order("AAPL", "banana", qty=1, price_per_contract=1.0)
 
+    def test_crypto_order_uses_gtc_tif(self):
+        fake_client = MagicMock()
+        fake_result = MagicMock(status="filled", id="crypto-1")
+        fake_client.submit_order.return_value = fake_result
+        with patch.object(execution, "is_trade_safe", return_value=True):
+            with patch.object(execution, "_get_trading_client", return_value=fake_client):
+                result = execution.place_order("BTC/USD", "buy", qty=0.01, price_per_share=50000.0)
+                self.assertTrue(result.submitted)
+                sent_order = fake_client.submit_order.call_args[0][0]
+                self.assertEqual(sent_order.time_in_force, execution.TimeInForce.GTC)
+
+    def test_equity_order_uses_day_tif(self):
+        fake_client = MagicMock()
+        fake_result = MagicMock(status="filled", id="eq-1")
+        fake_client.submit_order.return_value = fake_result
+        with patch.object(execution, "is_trade_safe", return_value=True):
+            with patch.object(execution, "_get_trading_client", return_value=fake_client):
+                execution.place_order("AAPL", "buy", qty=1, price_per_share=150.0)
+                sent_order = fake_client.submit_order.call_args[0][0]
+                self.assertEqual(sent_order.time_in_force, execution.TimeInForce.DAY)
+
+    def test_crypto_fractional_quantity(self):
+        fake_client = MagicMock()
+        fake_result = MagicMock(status="filled", id="frac-1")
+        fake_client.submit_order.return_value = fake_result
+        with patch.object(execution, "is_trade_safe", return_value=True):
+            with patch.object(execution, "_get_trading_client", return_value=fake_client):
+                execution.place_order("BTC/USD", "buy", qty=0.001, price_per_share=50000.0)
+                sent_order = fake_client.submit_order.call_args[0][0]
+                self.assertAlmostEqual(sent_order.qty, 0.001)
+
 
 class TestGetOptionContract(unittest.TestCase):
     def test_raises_when_no_contracts_found(self):
@@ -273,6 +304,20 @@ class TestClosePosition(unittest.TestCase):
                 sent_order = fake_client.submit_order.call_args[0][0]
                 self.assertEqual(sent_order.side, execution.OrderSide.BUY)
                 self.assertEqual(sent_order.qty, 5.0)
+
+    def test_close_crypto_position_uses_gtc(self):
+        fake_client = MagicMock()
+        fake_pos = MagicMock(qty="0.5", avg_entry_price="30000.0")
+        fake_client.get_open_position.side_effect = [fake_pos, Exception("No position remaining")]
+        fake_result = MagicMock(id="crypto-close-1", status="filled")
+        fake_client.submit_order.return_value = fake_result
+        with patch.object(execution, "is_trade_safe", return_value=True):
+            with patch.object(execution, "_get_trading_client", return_value=fake_client):
+                res = execution.close_position("BTC/USD")
+                self.assertTrue(res["ok"])
+                sent_order = fake_client.submit_order.call_args[0][0]
+                self.assertEqual(sent_order.time_in_force, execution.TimeInForce.GTC)
+                self.assertEqual(sent_order.qty, 0.5)
 
 
 class TestCancelAllOrdersAndClosePositions(unittest.TestCase):

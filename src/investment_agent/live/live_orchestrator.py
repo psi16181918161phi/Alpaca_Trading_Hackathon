@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import tempfile
 import time
@@ -49,9 +50,10 @@ from ..data.market_data import BarRequest, MarketDataClient
 from ..orchestrator import XQuantXOrchestrator
 from ..products import ProductGate, ProductGateInput
 from ..products.product_gate import (
-    OPTION_CALL, OPTION_PUT, PRODUCT_EQUITY, PRODUCT_NONE, PRODUCT_OPTION,
+    OPTION_CALL, OPTION_PUT, PRODUCT_CRYPTO, PRODUCT_EQUITY, PRODUCT_NONE, PRODUCT_OPTION,
 )
 from ..regimes.hmm_regime_detector import HMMRegimeDetector
+from ..utils.asset_class import is_crypto_symbol
 from .candidate_screener import CandidateScreener, ScreenResult
 from .circuit_breaker import CircuitBreaker, CircuitLevel, CircuitState
 from .order_state_machine import (
@@ -86,7 +88,7 @@ class LiveOrchestratorConfig:
     """Configuration for the live orchestrator."""
     symbol_universe: List[str] = field(default_factory=lambda: ["AAPL", "SPY", "MSFT"])
     top_n_candidates: int = 2
-    decision_interval_seconds: int = 300
+    decision_interval_seconds: int = 60
     state_file: str = "live_state.json"
     memory_file: str = "trade_memory.json"
     reputation_file: str = "reputation_state.json"
@@ -303,42 +305,136 @@ class LiveOrchestrator:
             if self._daily_start_equity > 0 else 0.0
         return dd, daily
 
-    def _run_one_candidate(
+    @staticmethod
+    def _compute_order_notional(effective_cap: float, equity: float) -> float:
+        """Return the dollar notional a candidate wants to deploy.
+
+        ``effective_cap`` is the fraction ``[0, 1]`` produced by the
+        capital gate.  The live orchestrator is the production layer,
+        so we convert that fraction to an actual dollar notional here
+        (the orchestrator's ``_compute_position_size`` is a test stub
+        that returns the raw fraction).
+        """
+        return max(0.0, float(effective_cap) * float(equity))
+
+    def _allocate_capital(
+        self,
+        decisions: List[Dict[str, Any]],
+        liquidity_floor: float = 5_000.0,
+    ) -> List[Dict[str, Any]]:
+        """Apply the EXISTING capital-architecture constraints across
+        multiple simultaneous BUY candidates.
+
+        The authoritative rules preserved here are:
+          * FLATTEN / BLOCK / HOLD → never submit
+          * REDUCE → submit at reduced effective_cap
+          * ALLOW → submit at full effective_cap
+          * Aggregate notional must leave the liquidity floor intact
+          * Per-position cap: ``MAX_POSITION_PCT`` of equity
+          * No double-spending: each candidate's notional is measured
+            against the *current* available liquidity, not the original
+
+        Candidates are ranked by effective_cap descending so the
+        capital gate's own assessment of "deserves more deployment"
+        gets priority.  The ranking is NOT a new scoring formula; it
+        is the capital gate's own output.
+        """
+        from investment_agent.execution.execution import MAX_POSITION_PCT
+
+        equity = self._equity if self._equity > 0 else 100_000.0
+        max_per_position = equity * float(MAX_POSITION_PCT)
+        available = max(0.0, equity - liquidity_floor)
+
+        # Separate by verdict tier (lexicographic priority).
+        def _tier(d: Dict[str, Any]) -> int:
+            v = str(d.get("verdict", "")).upper()
+            if v in ("FLATTEN", "BLOCK"):
+                return 3
+            if v == "REDUCE":
+                return 2
+            if d.get("action") == "HOLD" or d.get("product") == "none":
+                return 3
+            return 1  # ALLOW or no verdict
+
+        def _effective_cap(d: Dict[str, Any]) -> float:
+            return float(d.get("effective_cap", 0.0) or 0.0)
+
+        buy_decisions = [d for d in decisions if d.get("action") == "BUY"]
+        buy_decisions.sort(key=lambda d: (_tier(d), -_effective_cap(d)))
+
+        committed = 0.0
+        approved: List[Dict[str, Any]] = []
+        for d in buy_decisions:
+            if _tier(d) == 3:
+                d["_deferred_reason"] = "verdict blocks deployment"
+                approved.append(d)
+                continue
+            cap = _effective_cap(d)
+            if cap <= 0:
+                d["_deferred_reason"] = "zero effective_cap"
+                approved.append(d)
+                continue
+            notional = self._compute_order_notional(cap, equity)
+            notional = min(notional, max_per_position)
+            if committed + notional > available:
+                d["_deferred_reason"] = (
+                    f"aggregate deployment ${committed + notional:,.2f} "
+                    f"exceeds available ${available:,.2f}"
+                )
+                approved.append(d)
+                continue
+            committed += notional
+            d["_approved_notional"] = notional
+            approved.append(d)
+        return approved
+
+    def _evaluate_candidate(
         self,
         screen: ScreenResult,
         bar_ctx: Dict[str, Any],
         circuit: CircuitState,
     ) -> Dict[str, Any]:
-        """Run the full pipeline for a single screened candidate."""
+        """Run the full pipeline for a single screened candidate.
+
+        Returns a dict containing the evaluated decision plus all
+        intermediate results needed to submit the order later
+        (``experience``, ``pg``, ``actual_qty``, etc.).
+        No order is submitted and no position is opened.
+        """
         # 1. Run the 7 agents via the factory.
         agent_outputs = self._agent_factory(bar_ctx)
         if len(agent_outputs) != len(self._orch._agent_ids):
             return {
-                "symbol": screen.symbol,
-                "error": (
-                    f"agent_factory returned {len(agent_outputs)} outputs, "
-                    f"expected {len(self._orch._agent_ids)}"
-                ),
-                "agent_signals": {
-                    a.agent_id: float(getattr(a, "s", 0.0))
-                    for a in agent_outputs
+                "decision": {
+                    "symbol": screen.symbol,
+                    "error": (
+                        f"agent_factory returned {len(agent_outputs)} outputs, "
+                        f"expected {len(self._orch._agent_ids)}"
+                    ),
+                    "agent_signals": {
+                        a.agent_id: float(getattr(a, "s", 0.0))
+                        for a in agent_outputs
+                    },
                 },
+                "experience": None,
+                "pg": None,
+                "actual_qty": 0.0,
+                "screen": screen,
+                "bar_ctx": bar_ctx,
+                "circuit": circuit,
+                "agent_outputs": agent_outputs,
             }
 
         # 2. Regime + dynamic 7-State SoC + portfolio risk context.
         prices = bar_ctx["prices"]
         volumes = bar_ctx.get("volumes") or [0.0] * len(prices)
-        highs = bar_ctx.get("highs")    # OHLCV: genuine True Range when available
+        highs = bar_ctx.get("highs")
         lows = bar_ctx.get("lows")
 
-        # HMM is the single authoritative regime classifier — same HMM instance
-        # used by the orchestrator via _classify_regime so the regime is computed
-        # once and shared through the full cycle.
         regime = self._orch._classify_regime(
             prices=prices, volumes=volumes, highs=highs, lows=lows
         )
 
-        # Dynamic portfolio metrics from actual open positions & equity
         open_pos_list = self._positions.all_open()
         equity_val = self._equity if self._equity > 0 else 100_000.0
         total_pos_val = sum(
@@ -352,7 +448,6 @@ class LiveOrchestrator:
         avail_liq = max(0.0, equity_val - total_pos_val)
         dd, daily_loss = self._compute_drawdown_and_daily_loss()
 
-        # Compute 7-State SoC from evidence
         avg_confidence = float(
             sum(getattr(a, "confidence", 0.8) or 0.8 for a in agent_outputs)
             / max(1, len(agent_outputs))
@@ -387,7 +482,6 @@ class LiveOrchestrator:
         )
         experience = cycle.experience
 
-        # 3. Product gate.
         pg = self._product_gate.decide(ProductGateInput(
             action=experience.position_action,
             verdict=experience.capital_gate_verdict,
@@ -395,13 +489,27 @@ class LiveOrchestrator:
             disagreement=experience.disagreement,
             confidence=experience.effective_confidence,
             regime=regime.regime,
+            symbol=screen.symbol,
         ))
 
-        # 4. Circuit-breaker above the execution layer.
         can_equity = circuit.can_trade_equity
         can_option = circuit.can_trade_options
+        can_crypto = getattr(circuit, "can_trade_crypto", True)
+
+        current_price = float(bar_ctx.get("current_price", 0.0) or 0.0)
+        raw_cap = float(getattr(experience, "quantity", 0.0) or 0.0)
+        notional = self._compute_order_notional(raw_cap, self._equity)
+        if pg.product == PRODUCT_OPTION:
+            contract_mult = 100.0
+            actual_qty = max(1.0, notional / (current_price * contract_mult)) if current_price > 0 else 1.0
+        elif pg.product == PRODUCT_CRYPTO:
+            actual_qty = notional / current_price if current_price > 0 else 0.0
+        else:
+            actual_qty = math.floor(notional / current_price) if current_price > 0 else 0.0
+
+        # Build the decision dict (same shape as the old return value).
         if pg.product == PRODUCT_OPTION and not can_option:
-            return {
+            decision = {
                 "symbol": screen.symbol, "regime": regime.regime,
                 "action": experience.position_action,
                 "verdict": experience.capital_gate_verdict,
@@ -411,8 +519,19 @@ class LiveOrchestrator:
                 "experience_id": experience.decision_id,
                 "agent_signals": self._agent_signals_from(experience, agent_outputs),
             }
-        if pg.product == PRODUCT_EQUITY and not can_equity:
-            return {
+        elif pg.product == PRODUCT_CRYPTO and not can_crypto:
+            decision = {
+                "symbol": screen.symbol, "regime": regime.regime,
+                "action": experience.position_action,
+                "verdict": experience.capital_gate_verdict,
+                "ensemble_signal": experience.ensemble_signal,
+                "disagreement": experience.disagreement,
+                "product": "none", "reason": f"circuit={circuit.level.value} blocks crypto",
+                "experience_id": experience.decision_id,
+                "agent_signals": self._agent_signals_from(experience, agent_outputs),
+            }
+        elif pg.product == PRODUCT_EQUITY and not can_equity:
+            decision = {
                 "symbol": screen.symbol, "regime": regime.regime,
                 "action": experience.position_action,
                 "verdict": experience.capital_gate_verdict,
@@ -422,8 +541,8 @@ class LiveOrchestrator:
                 "experience_id": experience.decision_id,
                 "agent_signals": self._agent_signals_from(experience, agent_outputs),
             }
-        if pg.product == PRODUCT_NONE or experience.position_action == "HOLD":
-            return {
+        elif pg.product == PRODUCT_NONE or experience.position_action == "HOLD":
+            decision = {
                 "symbol": screen.symbol, "regime": regime.regime,
                 "action": experience.position_action,
                 "verdict": experience.capital_gate_verdict,
@@ -433,21 +552,66 @@ class LiveOrchestrator:
                 "experience_id": experience.decision_id,
                 "agent_signals": self._agent_signals_from(experience, agent_outputs),
             }
+        else:
+            decision = {
+                "symbol": screen.symbol, "regime": regime.regime,
+                "action": experience.position_action,
+                "verdict": experience.capital_gate_verdict,
+                "ensemble_signal": experience.ensemble_signal,
+                "disagreement": experience.disagreement,
+                "product": pg.product, "option_side": pg.option_side,
+                "quantity": actual_qty,
+                "effective_cap": raw_cap,
+                "notional": notional,
+                "reason": pg.reason,
+                "experience_id": experience.decision_id,
+                "agent_signals": self._agent_signals_from(experience, agent_outputs),
+            }
 
-        # 5. Submit the order via the executor (or simulate in dry-run).
+        return {
+            "decision": decision,
+            "experience": experience,
+            "pg": pg,
+            "actual_qty": actual_qty,
+            "screen": screen,
+            "bar_ctx": bar_ctx,
+            "circuit": circuit,
+            "agent_outputs": agent_outputs,
+        }
+
+    def _submit_from_evaluation(self, evaluated: Dict[str, Any]) -> Dict[str, Any]:
+        """Submit the order for an already-evaluated candidate.
+
+        Takes the dict returned by ``_evaluate_candidate``, calls the
+        executor, updates the order state machine, and opens positions
+        for fills.  Returns the updated decision dict with order fields.
+        """
+        experience = evaluated["experience"]
+        pg = evaluated["pg"]
+        actual_qty = evaluated["actual_qty"]
+        screen = evaluated["screen"]
+        bar_ctx = evaluated["bar_ctx"]
+        circuit = evaluated["circuit"]
+        agent_outputs = evaluated["agent_outputs"]
+        decision = dict(evaluated["decision"])
+
+        if not experience or not pg or pg.product == PRODUCT_NONE or experience.position_action == "HOLD":
+            return decision
+
         client_order_id = f"co-{uuid.uuid4().hex[:12]}"
+        option_side = pg.option_side if pg.product == PRODUCT_OPTION else None
         order_result = self._executor(
             screen.symbol, experience.position_action.lower(),
-            experience.quantity, pg.option_side,
+            actual_qty, option_side,
         )
-        rec = self._orders.register(
+        self._orders.register(
             client_order_id=client_order_id,
             decision_id=experience.decision_id,
             symbol=screen.symbol,
             side=experience.position_action.lower(),
-            qty=experience.quantity,
+            qty=actual_qty,
             product=pg.product,
-            option_side=pg.option_side,
+            option_side=option_side,
         )
         if order_result.get("id"):
             self._orders.set_broker_id(client_order_id, str(order_result["id"]))
@@ -463,39 +627,58 @@ class LiveOrchestrator:
                 client_order_id, OrderState.ACCEPTED, note="broker accepted",
             )
         elif broker_status in {"filled", "partially_filled"}:
-            fq = float(order_result.get("filled_qty", experience.quantity))
-            fp = float(order_result.get("filled_avg_price", 0.0))
+            self._orders.transition(
+                client_order_id, OrderState.ACCEPTED, note="broker accepted",
+            )
             self._orders.transition(
                 client_order_id, OrderState.FILLED,
-                note="broker reported fill", fill_qty=fq, fill_price=fp,
+                note="broker reported fill",
+                fill_qty=float(order_result.get("filled_qty", actual_qty)),
+                fill_price=float(order_result.get("filled_avg_price", 0.0) or 0.0),
             )
-            # Open a position
             self._positions.open_position(
                 decision_id=experience.decision_id,
                 client_order_id=client_order_id,
                 symbol=screen.symbol,
                 side=experience.position_action.lower(),
-                quantity=fq,
-                entry_price=fp,
+                quantity=float(order_result.get("filled_qty", actual_qty)),
+                entry_price=float(order_result.get("filled_avg_price", 0.0) or 0.0),
                 product=pg.product,
-                option_side=pg.option_side,
+                option_side=option_side,
             )
 
-        return {
-            "symbol": screen.symbol, "regime": regime.regime,
-            "action": experience.position_action,
-            "verdict": experience.capital_gate_verdict,
-            "ensemble_signal": experience.ensemble_signal,
-            "disagreement": experience.disagreement,
-            "product": pg.product, "option_side": pg.option_side,
-            "quantity": experience.quantity,
+        decision.update({
             "client_order_id": client_order_id,
             "broker_order_id": order_result.get("id"),
             "order_status": order_result.get("status"),
-            "reason": pg.reason,
-            "experience_id": experience.decision_id,
-            "agent_signals": self._agent_signals_from(experience, agent_outputs),
-        }
+            "filled_qty": float(order_result.get("filled_qty", 0.0) or 0.0),
+            "filled_avg_price": float(order_result.get("filled_avg_price", 0.0) or 0.0),
+            "quantity": actual_qty,
+        })
+        return decision
+
+    def _run_one_candidate(
+        self,
+        screen: ScreenResult,
+        bar_ctx: Dict[str, Any],
+        circuit: CircuitState,
+        submit: bool = True,
+    ) -> Dict[str, Any]:
+        """Run the full pipeline for a single screened candidate.
+
+        Parameters
+        ----------
+        submit : bool
+            When True (default) the order is submitted and positions are
+            opened.  When False the method returns the evaluated decision
+            without side-effects so the caller can run an aggregate
+            capital-allocation pass first.
+        """
+        evaluated = self._evaluate_candidate(screen, bar_ctx, circuit)
+        decision = evaluated["decision"]
+        if submit and decision.get("product") not in (None, "none") and decision.get("action") != "HOLD":
+            decision = self._submit_from_evaluation(evaluated)
+        return decision
 
     @staticmethod
     def _agent_signals_from(experience, agent_outputs) -> Dict[str, float]:
@@ -581,7 +764,13 @@ class LiveOrchestrator:
             daily_loss_pct=daily,
         )
 
-        # 4. Run each candidate through the pipeline (capped at max_lookups_per_interval)
+        # 4. Pass 1 — evaluate every screened candidate through the
+        #    complete pipeline (7 agents → HMM → ensemble → Kalman → SoC
+        #    → product gate → circuit breaker) WITHOUT submitting orders.
+        #    This guarantees that capital-gate and risk-gate inputs are
+        #    identical for every candidate (no earlier order skews later
+        #    evaluations).
+        evaluated: List[Dict[str, Any]] = []
         decisions: List[Dict[str, Any]] = []
         orders: List[Dict[str, Any]] = []
         llm_calls = 0
@@ -610,20 +799,44 @@ class LiveOrchestrator:
                 "features": features_dict,
                 "equity": self._equity, "drawdown_pct": -dd,
             }
-            decision = self._run_one_candidate(screen, bar_ctx, circuit)
-            decisions.append(decision)
-            if decision.get("client_order_id"):
-                orders.append({
-                    "client_order_id": decision["client_order_id"],
-                    "symbol": decision["symbol"],
-                    "product": decision["product"],
-                    "option_side": decision.get("option_side"),
-                    "order_status": decision.get("order_status"),
-                })
+            ev = self._evaluate_candidate(screen, bar_ctx, circuit)
+            evaluated.append(ev)
+            decisions.append(ev["decision"])
             llm_calls += 1
-            ensemble_signal = decision.get("ensemble_signal", ensemble_signal)
-            disagreement = decision.get("disagreement", disagreement)
-            regime_label = decision.get("regime", regime_label)
+            ensemble_signal = ev["decision"].get("ensemble_signal", ensemble_signal)
+            disagreement = ev["decision"].get("disagreement", disagreement)
+            regime_label = ev["decision"].get("regime", regime_label)
+
+        # 4b. Aggregate capital allocation — the EXISTING authoritative
+        #     rules (liquidity floor, per-position cap, diversification,
+        #     circuit breakers, lexicographic verdict priority) decide
+        #     which of the simultaneous BUY candidates actually deploy.
+        approved = self._allocate_capital(decisions)
+
+        # 4c. Pass 2 — submit only the orders that survived allocation,
+        #     reusing the pass-1 evaluation so the pipeline runs exactly
+        #     once per candidate (no double LLM / HMM / Kalama calls).
+        decision_to_eval = {id(ev["decision"]): ev for ev in evaluated}
+        for d in approved:
+            if d.get("_deferred_reason"):
+                continue
+            if d.get("product") in (None, "none") or d.get("action") == "HOLD":
+                continue
+            ev = decision_to_eval.get(id(d))
+            if ev is None:
+                continue
+            final_decision = self._submit_from_evaluation(ev)
+            orders.append({
+                "client_order_id": final_decision.get("client_order_id"),
+                "symbol": final_decision["symbol"],
+                "product": final_decision["product"],
+                "option_side": final_decision.get("option_side"),
+                "order_status": final_decision.get("order_status"),
+            })
+            idx = next((i for i, dd in enumerate(decisions)
+                        if id(dd) == id(d)), None)
+            if idx is not None:
+                decisions[idx] = final_decision
 
         # 5. Reconcile any open positions (mark to market, exits)
         exits = self._reconcile_outcomes()

@@ -1,4 +1,4 @@
-"""Product gate: decide between equity, option, and no-trade.
+"""Product gate: decide between equity, option, crypto, and no-trade.
 
 WHAT
 ====
@@ -8,6 +8,7 @@ signal strength / capital state, it picks a vehicle:
 
   * **equity**  -- plain stock order
   * **option**  -- call (bullish) or put (bearish)
+  * **crypto**  -- spot crypto pair (e.g. BTC/USD)
   * **none**    -- do not trade
 
 The product gate is *not* a risk override; it is a vehicle
@@ -38,9 +39,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
+from ..utils.asset_class import is_crypto_symbol as _is_crypto_symbol
+
 
 PRODUCT_EQUITY = "equity"
 PRODUCT_OPTION = "option"
+PRODUCT_CRYPTO = "crypto"
 PRODUCT_NONE = "none"
 
 OPTION_CALL = "call"
@@ -60,6 +64,7 @@ class ProductGateInput:
     disagreement: float                  # [0, 1]
     confidence: float                    # [0, 1]
     regime: str                          # e.g. R01..R12
+    symbol: Optional[str] = None         # ticker / crypto pair / OCC symbol
     # Optional knobs. The defaults are the spec's "sensible starting
     # point" values; they can be tuned per regime later.
     min_signal_for_option: float = 0.45
@@ -71,7 +76,7 @@ class ProductGateInput:
 class ProductGateResult:
     """Vehicle choice for the next order.
 
-    ``product`` is one of ``equity`` / ``option`` / ``none``.
+    ``product`` is one of ``equity`` / ``option`` / ``crypto`` / ``none``.
     For ``product == "option"``, ``option_side`` is set to ``call``
     or ``put``; ``option_strike_offset`` is a small integer
     (0 = at-the-money, 1 = slightly OTM, ...) so the execution
@@ -92,7 +97,7 @@ class ProductGateResult:
 
 
 class ProductGate:
-    """Decide equity / option / no-trade from a single decision."""
+    """Decide equity / option / crypto / no-trade from a single decision."""
 
     def __init__(
         self,
@@ -115,9 +120,18 @@ class ProductGate:
         signal = float(inp.ensemble_signal)
         disagreement = float(inp.disagreement)
         confidence = float(inp.confidence)
+        is_crypto = bool(inp.symbol) and _is_crypto_symbol(str(inp.symbol))
 
-        # Wide disagreement -> fall back to equity (cheap, liquid).
+        # Wide disagreement -> fall back to the cheapest liquid vehicle.
         if disagreement > self._max_disagreement:
+            if is_crypto:
+                return ProductGateResult(
+                    product=PRODUCT_CRYPTO,
+                    reason=(
+                        f"crypto: disagreement {disagreement:.2f} > "
+                        f"{self._max_disagreement:.2f}; liquid crypto vehicle"
+                    ),
+                )
             return ProductGateResult(
                 product=PRODUCT_EQUITY,
                 reason=(
@@ -150,8 +164,15 @@ class ProductGate:
                     ),
                 )
 
-        # Default: equity (modest signal, high disagreement, or any
-        # case that didn't qualify for an option).
+        # Default: crypto when the symbol is a crypto pair, else equity.
+        if is_crypto:
+            return ProductGateResult(
+                product=PRODUCT_CRYPTO,
+                reason=(
+                    f"crypto: |signal|={abs_sig:.2f} < {self._min_signal:.2f} or "
+                    f"confidence {confidence:.2f} < {self._high_confidence:.2f}"
+                ),
+            )
         return ProductGateResult(
             product=PRODUCT_EQUITY,
             reason=(
@@ -164,6 +185,7 @@ class ProductGate:
 __all__ = [
     "OPTION_CALL",
     "OPTION_PUT",
+    "PRODUCT_CRYPTO",
     "PRODUCT_EQUITY",
     "PRODUCT_NONE",
     "PRODUCT_OPTION",

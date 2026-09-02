@@ -396,7 +396,13 @@ def get_positions_safe() -> Dict[str, Any]:
     """Read-only open positions via execution.get_positions(), never raises."""
     try:
         from investment_agent.execution.execution import get_positions
-        return {"ok": True, "positions": get_positions()}
+        from ..utils.asset_class import classify_symbol
+        positions = []
+        for p in get_positions():
+            p = dict(p)
+            p["asset_class"] = classify_symbol(p.get("symbol", ""))
+            positions.append(p)
+        return {"ok": True, "positions": positions}
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": str(exc), "positions": []}
 
@@ -405,7 +411,13 @@ def get_order_history_safe(limit: int = 100) -> Dict[str, Any]:
     """Read-only order history via execution.get_order_history(), never raises."""
     try:
         from investment_agent.execution.execution import get_order_history
-        return {"ok": True, "orders": get_order_history(limit=limit)}
+        from ..utils.asset_class import classify_symbol
+        orders = []
+        for o in get_order_history(limit=limit):
+            o = dict(o)
+            o["asset_class"] = classify_symbol(o.get("symbol", ""))
+            orders.append(o)
+        return {"ok": True, "orders": orders}
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": str(exc), "orders": []}
 
@@ -423,21 +435,8 @@ def _is_option_symbol(symbol: str) -> bool:
     correctly rejected because the date / strike structure does not
     match.
     """
-    if not isinstance(symbol, str):
-        return False
-    if len(symbol) < 16:
-        return False
-    if "." in symbol:
-        return False
-    # The trailing 15 chars are always: 6 (date) + 1 (C/P) + 8 (strike)
-    date_part = symbol[-15:-9]
-    cp = symbol[-9]
-    strike_part = symbol[-8:]
-    if not date_part.isdigit():
-        return False
-    if cp not in ("C", "P"):
-        return False
-    return strike_part.isdigit()
+    from ..utils.asset_class import is_option_symbol
+    return is_option_symbol(symbol)
 
 
 def get_recent_options_activity(limit: int = 25) -> Dict[str, Any]:

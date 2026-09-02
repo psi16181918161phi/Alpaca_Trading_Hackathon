@@ -57,6 +57,7 @@ class CircuitState:
     triggered_signals: List[str]
     can_trade_equity: bool
     can_trade_options: bool
+    can_trade_crypto: bool
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -67,6 +68,7 @@ class CircuitState:
             "triggered_signals": list(self.triggered_signals),
             "can_trade_equity": bool(self.can_trade_equity),
             "can_trade_options": bool(self.can_trade_options),
+            "can_trade_crypto": bool(self.can_trade_crypto),
         }
 
 
@@ -162,6 +164,10 @@ class CircuitBreaker:
             # trade equity, but the spec says options need a quiet
             # regime.
             can_trade_options=overall == CircuitLevel.NORMAL,
+            # Crypto is treated like equity for circuit-breaker
+            # purposes: allowed at NORMAL / WARNING / RESTRICTED,
+            # blocked only at HALT.
+            can_trade_crypto=overall != CircuitLevel.HALT,
         )
 
 

@@ -2,25 +2,32 @@
 
 WHAT
 ====
-The only module that should construct an Alpaca ``StockHistoricalDataClient``
-or fetch OHLCV bars. The orchestrator, replay engine, dashboard loader,
-and feature extractor all go through this facade instead of reaching
-into Alpaca independently.
+The only module that should construct an Alpaca
+``StockHistoricalDataClient`` or ``CryptoHistoricalDataClient``
+and fetch OHLCV bars. The orchestrator, replay engine, dashboard
+loader, and feature extractor all go through this facade instead
+of reaching into Alpaca independently.
 
 WHY
 ====
-Previously bars were pulled ad-hoc in ``signals/hedge_signal.py`` and
-``memory/memory.py`` with their own client construction. That made it
-impossible to:
+Previously bars were pulled ad-hoc in ``signals/hedge_signal.py``
+and ``memory/memory.py`` with their own client construction. That
+made it impossible to:
   * swap the data source for backtest/replay (no fake-data injection)
   * reason about credentials in one place
   * unit-test the orchestrator against deterministic prices
+
+Asset-class routing is centralised here: equity symbols go through
+``StockHistoricalDataClient``, crypto symbols (e.g. ``BTC/USD``)
+go through ``CryptoHistoricalDataClient``, and the fake client
+keyed by raw symbol so tests can seed either asset class.
 
 HOW
 ====
 ``MarketDataClient`` is a thin wrapper that:
   * reads ``APCA_API_KEY_ID`` / ``APCA_API_SECRET_KEY`` once on init
   * lazy-constructs the underlying ``StockHistoricalDataClient``
+    or ``CryptoHistoricalDataClient`` depending on the symbol
   * exposes ``get_historical_bars`` that returns a normalized
     ``BarSeries`` (pandas DataFrame with ``open/high/low/close/volume``
     columns and a DatetimeIndex), not an opaque alpaca-py object
@@ -89,10 +96,15 @@ class AlpacaMarketDataClient:
 
     Construct lazily -- the SDK only requires the env vars at first
     use, so importing this module without keys set is safe.
+
+    Crypto symbols (e.g. ``BTC/USD``) are routed to
+    ``CryptoHistoricalDataClient`` automatically; everything else
+    goes to ``StockHistoricalDataClient``.
     """
     api_key: Optional[str] = field(default=None)
     api_secret: Optional[str] = field(default=None)
     _client: object = field(default=None, init=False, repr=False)
+    _crypto_client: object = field(default=None, init=False, repr=False)
 
     def _ensure_client(self):
         if self._client is not None:
@@ -104,27 +116,54 @@ class AlpacaMarketDataClient:
         )
         return self._client
 
+    def _ensure_crypto_client(self):
+        if self._crypto_client is not None:
+            return self._crypto_client
+        from alpaca.data.historical import CryptoHistoricalDataClient
+        self._crypto_client = CryptoHistoricalDataClient(
+            self.api_key or os.getenv("APCA_API_KEY_ID"),
+            self.api_secret or os.getenv("APCA_API_SECRET_KEY"),
+        )
+        return self._crypto_client
+
+    @staticmethod
+    def _is_crypto_symbol(symbol: str) -> bool:
+        from ..utils.asset_class import is_crypto_symbol
+        return is_crypto_symbol(symbol)
+
     def get_historical_bars(self, request: BarRequest) -> pd.DataFrame:
-        from alpaca.data.requests import StockBarsRequest
+        from alpaca.data.requests import StockBarsRequest, CryptoBarsRequest
         from alpaca.data.timeframe import TimeFrame
 
         unit = normalize_timeframe(request.timeframe)
         tf = getattr(TimeFrame, unit)
-        kwargs = {
-            "symbol_or_symbols": request.symbol,
-            "timeframe": tf,
-            "start": request.start,
-            # Paper-trading plans don't include real-time SIP data;
-            # use the IEX feed (15-min delayed, included with paper).
-            "feed": "iex",
-        }
-        if request.end is not None:
-            kwargs["end"] = request.end
-        if request.limit is not None:
-            kwargs["limit"] = request.limit
-        raw = self._ensure_client().get_stock_bars(StockBarsRequest(**kwargs))
+        crypto = self._is_crypto_symbol(request.symbol)
+        if crypto:
+            client = self._ensure_crypto_client()
+            kwargs = {
+                "symbol_or_symbols": request.symbol,
+                "timeframe": tf,
+                "start": request.start,
+            }
+            if request.end is not None:
+                kwargs["end"] = request.end
+            if request.limit is not None:
+                kwargs["limit"] = request.limit
+            raw = client.get_crypto_bars(CryptoBarsRequest(**kwargs))
+        else:
+            client = self._ensure_client()
+            kwargs = {
+                "symbol_or_symbols": request.symbol,
+                "timeframe": tf,
+                "start": request.start,
+                "feed": "iex",
+            }
+            if request.end is not None:
+                kwargs["end"] = request.end
+            if request.limit is not None:
+                kwargs["limit"] = request.limit
+            raw = client.get_stock_bars(StockBarsRequest(**kwargs))
         rows = []
-        # alpaca-py v2 returns a BarSet keyed by symbol
         for bar in raw[request.symbol]:
             rows.append({
                 "timestamp": bar.timestamp,
@@ -142,8 +181,19 @@ class AlpacaMarketDataClient:
         return df
 
     def get_latest_price(self, symbol: str) -> Optional[float]:
+        if self._is_crypto_symbol(symbol):
+            from alpaca.data.requests import CryptoLatestTradeRequest
+            try:
+                latest = self._ensure_crypto_client().get_crypto_latest_trade(
+                    CryptoLatestTradeRequest(symbol_or_symbols=symbol)
+                )
+            except Exception:
+                return None
+            trade = latest.get(symbol) if isinstance(latest, dict) else None
+            if trade is None:
+                return None
+            return float(trade.price)
         from alpaca.data.requests import StockLatestTradeRequest
-
         try:
             latest = self._ensure_client().get_stock_latest_trade(
                 StockLatestTradeRequest(symbol_or_symbols=symbol)

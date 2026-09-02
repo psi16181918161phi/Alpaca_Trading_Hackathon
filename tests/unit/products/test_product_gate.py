@@ -6,6 +6,7 @@ import unittest
 from investment_agent.products import (
     OPTION_CALL,
     OPTION_PUT,
+    PRODUCT_CRYPTO,
     PRODUCT_EQUITY,
     PRODUCT_NONE,
     PRODUCT_OPTION,

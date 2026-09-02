@@ -66,6 +66,7 @@ from .memory.trade_memory import (
     TradeLifecycle,
     DEFAULT_MEMORY_FILE,
 )
+from .utils.asset_class import classify_symbol
 from .execution.hedge_capital_bridge import evaluate_hedge_risk, HedgeRiskAssessment
 
 
@@ -424,6 +425,7 @@ class XQuantXOrchestrator:
             decision_id=decision.decision_id,
             timestamp=datetime.now(),
             symbol=self._symbol,
+            asset_class=classify_symbol(self._symbol),
             regime=regime.regime,
             regime_probabilities=dict(regime.regime_affinity),
             agent_signals={a.agent_id: float(a.s) for a in getattr(decision, "_agent_outputs", [])},
@@ -652,6 +654,7 @@ class XQuantXOrchestrator:
             decision_id=str(uuid.uuid4()),
             timestamp=datetime.now(),
             symbol=self._symbol,
+            asset_class=classify_symbol(self._symbol),
             regime=regime.regime,
             regime_probabilities=dict(regime.regime_affinity),
             agent_signals={aid: 0.0 for aid in self._agent_ids},
@@ -1002,6 +1005,7 @@ class XQuantXOrchestrator:
             decision_id=decision.decision_id,
             timestamp=datetime.now(),
             symbol=self._symbol,
+            asset_class=classify_symbol(self._symbol),
             regime=regime.regime,
             regime_probabilities=dict(regime.regime_affinity),
             agent_signals=agent_signals,
@@ -1235,6 +1239,7 @@ class XQuantXOrchestrator:
             decision_id=str(uuid.uuid4()),
             timestamp=datetime.now(),
             symbol=self._symbol,
+            asset_class=classify_symbol(self._symbol),
             regime=regime_result.regime,
             regime_probabilities=dict(regime_result.regime_affinity),
             agent_signals={aid: 0.0 for aid in self._agent_ids},

@@ -1,8 +1,12 @@
 from alpaca.trading.enums import OrderSide, TimeInForce, ContractType
 from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import MarketOrderRequest, GetOptionContractsRequest
+from alpaca.trading.requests import (
+    MarketOrderRequest,
+    GetOptionContractsRequest,
+)
 from dotenv import load_dotenv
 import json
+import math
 import os
 import tempfile
 from datetime import datetime, timezone
@@ -15,11 +19,16 @@ _trading_client = None
 def _get_trading_client():
     global _trading_client
     if _trading_client is None:
-        _trading_client = TradingClient(os.getenv("APCA_API_KEY_ID"), os.getenv("APCA_API_SECRET_KEY"), paper=True)
+        _trading_client = TradingClient(
+            os.getenv("APCA_API_KEY_ID"), os.getenv("APCA_API_SECRET_KEY"), paper=True,
+        )
     return _trading_client
 
 
 from dataclasses import dataclass
+
+from ..utils.asset_class import classify_symbol, is_crypto_symbol, is_option_symbol
+
 
 @dataclass
 class ExecutionResult:
@@ -84,14 +93,6 @@ def get_option_contract(underlying_symbol, expiration=None, strike=None, option_
     return contracts[0]
 
 
-def _is_option_symbol(symbol: str) -> bool:
-    """Check if a symbol is an OCC formatted option symbol."""
-    if not symbol or len(symbol) <= 6:
-        return False
-    # OCC option symbols are 15+ chars, with strike/expiration digits after ticker
-    return len(symbol) >= 15 and any(c.isdigit() for c in symbol[6:])
-
-
 MAX_POSITION_PCT = 0.05  # never risk more than 5% of buying power on one trade
 
 
@@ -108,10 +109,16 @@ def is_trade_safe(
         return False
 
     if is_option is None:
-        is_option = _is_option_symbol(symbol)
+        is_option = is_option_symbol(symbol)
 
     # Options are priced per share, 100 shares per contract. Equity shares multiplier is 1.
-    multiplier = 100.0 if is_option else 1.0
+    # Crypto is priced per unit with no contract multiplier (fractional allowed).
+    if is_option:
+        multiplier = 100.0
+    elif is_crypto_symbol(symbol):
+        multiplier = 1.0
+    else:
+        multiplier = 1.0
 
     client = _get_trading_client()
     account = client.get_account()
@@ -132,7 +139,13 @@ def place_order(
     price_per_share: Optional[float] = None,
     is_option: Optional[bool] = None,
 ):
-    """Place a market order (stock or option symbol) and return an ExecutionResult."""
+    """Place a market order (stock, option, or crypto) and return an ExecutionResult.
+
+    Asset class is detected from the symbol:
+      * OCC-format option symbols -> ``is_option=True``
+      * Slash-form crypto pairs (``BTC/USD``) -> crypto TIF (GTC/IOC)
+      * Everything else -> equity TIF (DAY)
+    """
     s = str(side).strip().lower()
     if s == "buy":
         order_side = OrderSide.BUY
@@ -149,11 +162,14 @@ def place_order(
             reason=f"Position size limit (>{MAX_POSITION_PCT:.0%}) or invalid price",
         )
 
+    crypto = is_crypto_symbol(symbol)
+    tif = TimeInForce.GTC if crypto else TimeInForce.DAY
+
     order = MarketOrderRequest(
         symbol=symbol,
         qty=qty,
         side=order_side,
-        time_in_force=TimeInForce.DAY,
+        time_in_force=tif,
     )
     client = _get_trading_client()
     result = client.submit_order(order)
@@ -279,6 +295,104 @@ def get_order_history(limit=100):
         }
         for o in orders
     ]
+
+
+def get_crypto_asset_metadata(symbol: str) -> Dict[str, Any]:
+    """Fetch Alpaca asset metadata for a crypto symbol.
+
+    Returns a dict with the asset's ``status``, ``tradable`` flag,
+    ``fractionable`` flag, and any ``min_order_size`` /
+    ``min_trade_increment`` / ``price_increment`` the broker
+    reports. Returns ``ok=False`` with an error reason when the
+    asset is unavailable, inactive, or not tradable.
+
+    For non-crypto symbols the function returns ``ok=False`` so
+    callers know to use a different validation path.
+    """
+    if not is_crypto_symbol(symbol):
+        return {
+            "ok": False,
+            "symbol": symbol,
+            "error": f"{symbol!r} is not a crypto symbol; use equity/option path",
+        }
+    try:
+        client = _get_trading_client()
+        assets = client.get_assets()
+        match = None
+        for a in assets:
+            if str(a.symbol) == symbol and str(getattr(a, "asset_class", "")).lower() == "crypto":
+                match = a
+                break
+        if match is None:
+            return {
+                "ok": False,
+                "symbol": symbol,
+                "error": "asset not found in Alpaca crypto assets",
+            }
+        tradable = bool(getattr(match, "tradable", False))
+        status = str(getattr(match, "status", "")).lower()
+        if status != "active" or not tradable:
+            return {
+                "ok": False,
+                "symbol": symbol,
+                "error": f"asset status={status} tradable={tradable}",
+            }
+        return {
+            "ok": True,
+            "symbol": symbol,
+            "asset_class": "crypto",
+            "status": status,
+            "tradable": tradable,
+            "fractionable": bool(getattr(match, "fractionable", True)),
+            "min_order_size": _safe_float(getattr(match, "min_order_size", None)),
+            "min_trade_increment": _safe_float(getattr(match, "min_trade_increment", None)),
+            "price_increment": _safe_float(getattr(match, "price_increment", None)),
+        }
+    except Exception as exc:
+        return {"ok": False, "symbol": symbol, "error": str(exc)}
+
+
+def _round_crypto_qty(qty: float, increment: Optional[float]) -> float:
+    """Round *qty* down to the nearest valid crypto lot size.
+
+    If *increment* is None or 0, no rounding is applied.
+    """
+    if not increment or increment <= 0:
+        return qty
+    return math.floor(qty / increment) * increment
+
+
+def apply_crypto_sizing(
+    symbol: str,
+    notional_usd: float,
+    price: float,
+    min_increment: Optional[float] = None,
+    min_order_size: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Compute a fractional crypto quantity from a target notional.
+
+    Returns a dict with ``qty`` (rounded to the broker's lot
+    increment), ``notional``, and any validation errors.
+    """
+    if price <= 0:
+        return {"ok": False, "error": f"invalid price for {symbol}: {price}"}
+    raw_qty = notional_usd / price
+    qty = _round_crypto_qty(raw_qty, min_increment)
+    if min_order_size is not None and qty < min_order_size:
+        return {
+            "ok": False,
+            "error": (
+                f"qty {qty:.8f} below min_order_size "
+                f"{min_order_size} for {symbol}"
+            ),
+        }
+    return {
+        "ok": True,
+        "symbol": symbol,
+        "qty": qty,
+        "notional": qty * price,
+        "raw_qty": raw_qty,
+    }
 
 
 ACCOUNT_BASELINE_FILE = "alpaca_account_baseline.json"
@@ -476,11 +590,13 @@ def close_position(symbol: str) -> Dict[str, Any]:
 
     # --- 3. Submit SELL for exactly held_qty --------------------------------
     side = OrderSide.SELL if position_before > 0 else OrderSide.BUY  # short cover
+    crypto = is_crypto_symbol(symbol)
+    tif = TimeInForce.GTC if crypto else TimeInForce.DAY
     order = MarketOrderRequest(
         symbol=symbol,
         qty=close_qty,
         side=side,
-        time_in_force=TimeInForce.DAY,
+        time_in_force=tif,
     )
     result = client.submit_order(order)
     order_id = str(getattr(result, "id", ""))
