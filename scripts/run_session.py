@@ -52,6 +52,10 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
