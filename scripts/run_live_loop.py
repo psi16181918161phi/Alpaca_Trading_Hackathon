@@ -350,7 +350,7 @@ def main() -> int:
                         help="Stop after N intervals (default: forever)")
     parser.add_argument("--max-lookups", type=int, default=2,
                         help="Max LLM calls per decision interval")
-    parser.add_argument("--symbols", default="AAPL,SPY,MSFT")
+    parser.add_argument("--symbols", default="AAPL,SPY,MSFT,TSLA,NVDA,BTC/USD,ETH/USD,SOL/USD,AVAX/USD,LINK/USD,XRP/USD,DOGE/USD,RENDER/USD")
     parser.add_argument("--top-n", type=int, default=2)
     parser.add_argument("--state-file", default="live_state.json")
     parser.add_argument("--memory-file", default="trade_memory.json")

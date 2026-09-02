@@ -361,7 +361,7 @@ def main() -> int:
                         help="Decision interval in seconds")
     parser.add_argument("--max-lookups", type=int, default=2,
                         help="Max LLM calls per decision interval")
-    parser.add_argument("--symbols", default="AAPL,SPY,MSFT,TSLA,NVDA")
+    parser.add_argument("--symbols", default="AAPL,SPY,MSFT,TSLA,NVDA,BTC/USD,ETH/USD,SOL/USD,AVAX/USD,LINK/USD,XRP/USD,DOGE/USD,RENDER/USD")
     parser.add_argument("--top-n", type=int, default=2)
     parser.add_argument("--lookback", type=int, default=60)
     parser.add_argument("--status-file", default="session_status.json",

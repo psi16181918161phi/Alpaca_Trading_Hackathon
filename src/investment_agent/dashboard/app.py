@@ -211,7 +211,11 @@ def _render_control_room(_n_clicks):
 DEFAULT_SESSION_PARAMS: Dict[str, Any] = {
     "stage": "paper",
     "decision_interval_seconds": 300,
-    "symbol_universe": ["AAPL", "SPY", "MSFT", "TSLA", "NVDA"],
+    "symbol_universe": [
+        "AAPL", "SPY", "MSFT", "TSLA", "NVDA",
+        "BTC/USD", "ETH/USD", "SOL/USD", "AVAX/USD",
+        "LINK/USD", "XRP/USD", "DOGE/USD", "RENDER/USD",
+    ],
     "max_lookups_per_interval": 2,
 }
 

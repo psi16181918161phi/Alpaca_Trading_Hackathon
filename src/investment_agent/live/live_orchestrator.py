@@ -86,7 +86,11 @@ The result must contain at least ``{"id": str|None, "status": str,
 @dataclass
 class LiveOrchestratorConfig:
     """Configuration for the live orchestrator."""
-    symbol_universe: List[str] = field(default_factory=lambda: ["AAPL", "SPY", "MSFT"])
+    symbol_universe: List[str] = field(default_factory=lambda: [
+        "AAPL", "SPY", "MSFT", "TSLA", "NVDA",
+        "BTC/USD", "ETH/USD", "SOL/USD", "AVAX/USD",
+        "LINK/USD", "XRP/USD", "DOGE/USD", "RENDER/USD",
+    ])
     top_n_candidates: int = 2
     decision_interval_seconds: int = 60
     state_file: str = "live_state.json"
