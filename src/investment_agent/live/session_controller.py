@@ -206,13 +206,23 @@ class SessionController:
     # ----- status persistence -----
 
     def _update_status(self, **kwargs: Any) -> None:
+        # In-memory update and the on-disk write happen under the same lock
+        # hold. This used to write to disk *outside* the lock ("so we never
+        # block readers on disk"), which sounds harmless but isn't: a caller
+        # that observes the new in-memory state (e.g. via the `status`
+        # property, right after `_wait_for_state` unblocks) could read the
+        # status file a moment later and get the *previous* write, or no
+        # file at all yet -- because nothing serialized "in-memory changed"
+        # with "disk reflects it". `self._lock` is an RLock, so holding it
+        # across this small local JSON write does not risk a deadlock with
+        # any other method here, and the write itself is a few KB to local
+        # disk, so the extra time under the lock is negligible.
         with self._lock:
             for k, v in kwargs.items():
                 if hasattr(self._status, k):
                     setattr(self._status, k, v)
             payload = self._status.to_dict()
-        # Write outside the lock so we never block readers on disk.
-        self._persist_status(payload)
+            self._persist_status(payload)
 
     def _persist_status(self, payload: Dict[str, Any]) -> None:
         path = self.status_file
@@ -365,12 +375,23 @@ class SessionController:
             if self._emergency_stop.is_set():
                 self._cancel_open_orders()
 
-            # Final persistence so the dashboard sees a clean STOPPED.
-            self._update_status(
-                state=SessionState.STOPPED.value,
-                stopped_at=datetime.now(timezone.utc).isoformat(),
-                next_cycle_at=None,
-            )
+            # Clear the thread reference and persist the final STOPPED
+            # status together, under one lock hold. These used to happen
+            # as two separate steps (status write here, `self._thread =
+            # None` down in `finally`), which left a race: a caller could
+            # observe state == STOPPED via `self.status` and immediately
+            # call start() again, while `self._thread` was still the old
+            # (barely-alive) Thread object -- start()'s "already running"
+            # check would then spuriously refuse the restart. Doing both
+            # under `self._lock` means anyone who acquires the lock (as
+            # start() does) sees them as a single atomic transition.
+            with self._lock:
+                self._thread = None
+                self._update_status(
+                    state=SessionState.STOPPED.value,
+                    stopped_at=datetime.now(timezone.utc).isoformat(),
+                    next_cycle_at=None,
+                )
             final_status = self.status
             if self._on_session_complete is not None:
                 try:
@@ -379,16 +400,13 @@ class SessionController:
                     logger.exception("on_session_complete callback failed")
         except Exception as exc:  # noqa: BLE001
             logger.exception("session thread crashed")
-            self._update_status(
-                state=SessionState.ERROR.value,
-                last_error=str(exc),
-                stopped_at=datetime.now(timezone.utc).isoformat(),
-            )
-        finally:
-            # Mark the thread reference as None so a subsequent start()
-            # sees a clean slate (idempotent restart).
             with self._lock:
                 self._thread = None
+                self._update_status(
+                    state=SessionState.ERROR.value,
+                    last_error=str(exc),
+                    stopped_at=datetime.now(timezone.utc).isoformat(),
+                )
 
     def _on_cycle_complete(self, report: Any) -> None:
         """Update the session status from a freshly-completed IntervalReport."""
