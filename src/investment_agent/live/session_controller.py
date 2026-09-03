@@ -86,6 +86,7 @@ class SessionStatus:
     stopped_at: Optional[str] = None
     last_cycle_at: Optional[str] = None
     last_decision_summary: str = ""
+    last_decisions: List[Dict[str, Any]] = field(default_factory=list)
     last_error: str = ""
     cycle_index: int = 0
     next_cycle_at: Optional[str] = None
@@ -414,6 +415,7 @@ class SessionController:
         orders = len(getattr(report, "orders", []) or [])
         exits = len(getattr(report, "exits", []) or [])
         last_decision = ""
+        last_decisions = []
         try:
             d = (getattr(report, "decisions", []) or [])
             if d:
@@ -425,6 +427,11 @@ class SessionController:
                     last_decision = _fmt(meaningful[0])
                 else:
                     last_decision = _fmt(d[0])
+                last_decisions = [
+                    {"symbol": x.get("symbol"), "action": x.get("action"),
+                     "product": x.get("product"), "ensemble_signal": x.get("ensemble_signal")}
+                    for x in d
+                ]
         except Exception:  # noqa: BLE001
             pass
         interval = int(self._start_params.get("decision_interval_seconds", 60))
@@ -442,6 +449,7 @@ class SessionController:
         self._update_status(
             last_cycle_at=datetime.now(timezone.utc).isoformat(),
             last_decision_summary=last_decision,
+            last_decisions=last_decisions,
             next_cycle_at=next_at,
         )
 

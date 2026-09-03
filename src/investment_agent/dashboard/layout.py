@@ -180,6 +180,7 @@ def session_control_panel(session_status, command_file="/tmp/session_command.jso
     session_id = str(session_status.get("session_id", "") or "")
     cycle_index = int(session_status.get("cycle_index", 0) or 0)
     last_decision = str(session_status.get("last_decision_summary", "") or "")
+    last_decisions = session_status.get("last_decisions", []) or []
     last_cycle_at = str(session_status.get("last_cycle_at", "") or "")
     next_cycle_at = str(session_status.get("next_cycle_at", "") or "")
     started_at = str(session_status.get("started_at", "") or "")
@@ -307,8 +308,43 @@ def session_control_panel(session_status, command_file="/tmp/session_command.jso
                     _kpi("CLOSED", f"{total_closed}"),
                     _kpi("LAST CYCLE", _short_iso(last_cycle_at)),
                     _kpi("NEXT CYCLE", _short_iso(next_cycle_at)),
-                    _kpi("INTERVAL", f"{interval_s}s" if interval_s else "n/a"),
-                    _kpi("LAST DECISION", last_decision or "n/a"),
+                     _kpi("INTERVAL", f"{interval_s}s" if interval_s else "n/a"),
+                     _kpi("LAST DECISION", last_decision or "n/a"),
+                     html.Div(
+                         children=[
+                             html.Span(
+                                 "CYCLE DECISIONS:",
+                                 style={
+                                     "color": colors.TEXT_SECONDARY,
+                                     "fontSize": "10px",
+                                     "fontWeight": "bold",
+                                     "marginBottom": "4px",
+                                     "display": "block",
+                                 },
+                             ),
+                             *[
+                                 html.Span(
+                                     f"{d.get('action', 'HOLD')} {d.get('symbol', '?')} ({d.get('product', 'none')})",
+                                     style={
+                                         "color": colors.SERIES_LONG
+                                         if d.get("action") not in ("HOLD", None)
+                                         else colors.TEXT_SECONDARY,
+                                         "fontSize": "10px",
+                                         "display": "block",
+                                         "marginBottom": "2px",
+                                     },
+                                 )
+                                 for d in (last_decisions or [])
+                             ],
+                         ],
+                         style={
+                             "gridColumn": "span 4",
+                             "background": colors.BACKGROUND_CARD,
+                             "borderRadius": "6px",
+                             "padding": "8px",
+                             "marginTop": "4px",
+                         },
+                     ),
                 ],
                 style={
                     "display": "grid",
