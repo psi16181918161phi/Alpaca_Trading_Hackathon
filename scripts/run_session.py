@@ -67,27 +67,26 @@ logger = logging.getLogger("xqx.session_daemon")
 def _load_llm_provider():
     """Return a mock or real LLM provider based on env keys.
 
-    Mirrors ``scripts/run_live_loop._load_llm_provider`` so the
-    daemon's bootstrap matches the standalone CLI one-for-one.
+    Loads straight from config/llm_keys.json + env vars via
+    ``load_provider_specs()``, same as
+    ``scripts/run_live_loop._load_llm_provider``.
+
+    This used to first collect keys into a hardcoded {pid: env_var} dict
+    and re-export them under a second set of env var names before calling
+    load_provider_specs(). That dict had drifted out of sync with
+    config/llm_keys.json.example -- e.g. it re-exported a key under
+    FEATHERLESS_FINANCE_QLORA_KEY, but the config only ever declares a
+    "finance_llama" provider (api_key_env FEATHERLESS_FINANCE_LLAMA_KEY),
+    so that provider's key was silently never found. Calling
+    load_provider_specs() directly removes that extra relabeling step, so
+    whatever config/llm_keys.json + .env actually say is what gets used.
     """
     from investment_agent.llm.base import MockLLMProvider
 
-    keys = {
-        "deephermes": os.getenv("FEATHERLESS_DEEPHERMES_KEY"),
-        "fundamentals": os.getenv("FEATHERLESS_FINANCE_LLAMA_KEY"),
-        "finance_qlora": os.getenv("FEATHERLESS_QWEN_TRADING_KEY"),
-        "reserve": os.getenv("FEATHERLESS_RESERVE_KEY"),
-    }
-    have_any = any(keys.values())
-    if not have_any:
-        return MockLLMProvider(responder=_mock_responder), "mock"
     try:
         from investment_agent.llm.orchestrator import (
             FeatherlessOrchestrator, load_provider_specs,
         )
-        for pid, key in keys.items():
-            if key:
-                os.environ[f"FEATHERLESS_{pid.upper()}_KEY"] = key
         specs = load_provider_specs()
         specs = [s for s in specs if s.api_key]
         if not specs:
@@ -366,7 +365,7 @@ def main() -> int:
     parser.add_argument("--max-lookups", type=int, default=2,
                         help="Max LLM calls per decision interval")
     parser.add_argument("--symbols", default="AAPL,SPY,MSFT,TSLA,NVDA,BTC/USD,ETH/USD,SOL/USD,AVAX/USD,LINK/USD,XRP/USD,DOGE/USD,RENDER/USD")
-    parser.add_argument("--top-n", type=int, default=2)
+    parser.add_argument("--top-n", type=int, default=3)
     parser.add_argument("--lookback", type=int, default=60)
     parser.add_argument("--status-file", default="session_status.json",
                         help="Where to persist session status "

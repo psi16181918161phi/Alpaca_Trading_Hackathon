@@ -91,7 +91,7 @@ class LiveOrchestratorConfig:
         "BTC/USD", "ETH/USD", "SOL/USD", "AVAX/USD",
         "LINK/USD", "XRP/USD", "DOGE/USD", "RENDER/USD",
     ])
-    top_n_candidates: int = 2
+    top_n_candidates: int = 3
     decision_interval_seconds: int = 60
     state_file: str = "live_state.json"
     memory_file: str = "trade_memory.json"
