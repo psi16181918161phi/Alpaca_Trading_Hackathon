@@ -38,7 +38,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Any, Optional, Sequence
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -172,7 +172,7 @@ def capture(args: argparse.Namespace, url: str) -> int:
             shutil.rmtree(staging)
         staging.mkdir(parents=True)
 
-    context_options = {
+    context_options: dict[str, Any] = {
         "viewport": {"width": SLIDE_WIDTH_PX, "height": SLIDE_HEIGHT_PX},
     }
     if args.record_video:
