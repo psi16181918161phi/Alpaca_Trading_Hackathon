@@ -1,0 +1,771 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <title>X Quant X - Presentation Deck</title>
+    <meta name="description" content="X Quant X: a multi-agent, risk-gated quantitative paper-trading platform on the Alpaca API.">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="stylesheet"
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@400;600&display=swap">
+    <link rel="stylesheet" href="theme.css">
+</head>
+
+<body>
+
+    <!-- Shared arrowhead markers, referenced by every inline diagram below. -->
+    <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+        <defs>
+            <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7"
+                orient="auto-start-reverse">
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="#7d5a60" />
+            </marker>
+            <marker id="arrow-alert" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7"
+                orient="auto-start-reverse">
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="#FFAEC9" />
+            </marker>
+        </defs>
+    </svg>
+
+    <!-- ========================================================= 01 title -->
+    <section class="slide">
+        <div style="flex:1;display:flex;flex-direction:column;justify-content:center">
+            <div class="eyebrow">LabLab AI &middot; Alpaca Paper Trading</div>
+            <h1>X&nbsp;Quant&nbsp;X</h1>
+            <p class="tagline">Predict less blindly. Measure more completely.<br>Control risk before capital.</p>
+            <p class="lead" style="margin-top:40px">
+                A multi-agent quantitative <strong>paper-trading</strong> platform that infers the market
+                regime, fuses seven specialist opinions into one risk-gated decision, and executes it
+                through the Alpaca paper API.
+            </p>
+        </div>
+        <div class="slide-brand">X Quant X</div>
+        <div class="slide-number"></div>
+    </section>
+
+    <!-- ======================================================= 02 problem -->
+    <section class="slide">
+        <div class="eyebrow">01 &middot; The problem</div>
+        <h2>Single-model trading systems fail<br>in four predictable ways.</h2>
+        <div class="body">
+            <div class="col">
+                <ol class="numbered">
+                    <li><strong>Non-stationarity.</strong> A strategy tuned on a quiet bull tape is not
+                        merely weaker in a liquidity crisis - it is solving a different problem. With no
+                        explicit regime variable, the wrong policy is applied silently.</li>
+                    <li><strong>False consensus.</strong> Ensembling models that share a feature set
+                        produces agreement that looks like confidence and is actually correlation.</li>
+                </ol>
+            </div>
+            <div class="col">
+                <ol class="numbered" start="3" style="counter-reset:item 2">
+                    <li><strong>Risk applied after the fact.</strong> Sizing bolted downstream of a "buy"
+                        cannot prevent a structurally bad trade. It can only make it smaller.</li>
+                    <li><strong>Unfalsifiable claims.</strong> A backtest curve is not evidence. A system
+                        that never reports its own rejected trades is not auditable.</li>
+                </ol>
+            </div>
+        </div>
+        <div class="slide-brand">X Quant X</div>
+        <div class="slide-number"></div>
+    </section>
+
+    <!-- ======================================================== 03 thesis -->
+    <section class="slide">
+        <div class="eyebrow">02 &middot; The thesis</div>
+        <h2>The market is not one thing - and no single<br>model should be trusted to say what it is.</h2>
+        <div class="body" style="align-items:stretch">
+            <div class="card col">
+                <h3>Regime before opportunity</h3>
+                <p>An HMM classifies the environment into twelve archetypes, R01 to R12. Every downstream
+                    component is conditioned on that classification.</p>
+            </div>
+            <div class="card col">
+                <h3>Disagreement stays visible</h3>
+                <p>Seven agents view the same market through seven lenses. Their disagreement is computed
+                    and carried forward as a first-class quantity, never averaged away.</p>
+            </div>
+            <div class="card alert-card col">
+                <div class="label">The core rule</div>
+                <div class="value" style="font-size:40px;margin-top:16px">Gate capital,<br>not opinion.</div>
+                <p class="note">A seven-state gate sits between signal and broker. It can ALLOW, REDUCE,
+                    BLOCK or FLATTEN - on measured capacity, not on model confidence.</p>
+            </div>
+        </div>
+        <div class="slide-brand">X Quant X</div>
+        <div class="slide-number"></div>
+    </section>
+
+    <!-- ================================================== 04 architecture -->
+    <section class="slide">
+        <div class="eyebrow">03 &middot; Architecture</div>
+        <h2>One cycle, nine stages, one gate.</h2>
+        <div class="body">
+            <svg class="diagram" viewBox="0 0 1730 545" preserveAspectRatio="xMidYMid meet" role="img"
+                aria-label="End to end pipeline from market data through the capital gate to Alpaca execution and back into learning.">
+                <!-- row 1 -->
+                <g>
+                    <rect class="node accent" x="10" y="40" width="230" height="96" rx="10" />
+                    <text x="125" y="82" text-anchor="middle" font-size="24" font-weight="600">Market Data</text>
+                    <text class="small" x="125" y="112" text-anchor="middle">prices &middot; volume &middot; quotes</text>
+
+                    <rect class="node" x="300" y="40" width="230" height="96" rx="10" />
+                    <text x="415" y="82" text-anchor="middle" font-size="24" font-weight="600">Features</text>
+                    <text class="small" x="415" y="112" text-anchor="middle">RSI &middot; ATR &middot; VIX proxy</text>
+
+                    <rect class="node accent" x="590" y="40" width="230" height="96" rx="10" />
+                    <text x="705" y="82" text-anchor="middle" font-size="24" font-weight="600">HMM Regime</text>
+                    <text class="small" x="705" y="112" text-anchor="middle">R01 - R12</text>
+
+                    <rect class="node" x="880" y="40" width="230" height="96" rx="10" />
+                    <text x="995" y="82" text-anchor="middle" font-size="24" font-weight="600">Trade Memory</text>
+                    <text class="small" x="995" y="112" text-anchor="middle">top-K similar past</text>
+
+                    <rect class="node accent" x="1170" y="40" width="250" height="96" rx="10" />
+                    <text x="1295" y="82" text-anchor="middle" font-size="24" font-weight="600">7 Specialist Agents</text>
+                    <text class="small" x="1295" y="112" text-anchor="middle">independent lenses</text>
+
+                    <rect class="node" x="1480" y="40" width="240" height="96" rx="10" />
+                    <text x="1600" y="82" text-anchor="middle" font-size="24" font-weight="600">Ensemble</text>
+                    <text class="small" x="1600" y="112" text-anchor="middle">signal + disagreement</text>
+                </g>
+                <path class="edge" d="M 240 88 L 296 88" marker-end="url(#arrow)" />
+                <path class="edge" d="M 530 88 L 586 88" marker-end="url(#arrow)" />
+                <path class="edge" d="M 820 88 L 876 88" marker-end="url(#arrow)" />
+                <path class="edge" d="M 1110 88 L 1166 88" marker-end="url(#arrow)" />
+                <path class="edge" d="M 1420 88 L 1476 88" marker-end="url(#arrow)" />
+
+                <!-- row 2 -->
+                <path class="edge" d="M 1600 136 L 1600 200 L 125 200 L 125 264" marker-end="url(#arrow)" />
+                <g>
+                    <rect class="node" x="10" y="266" width="250" height="96" rx="10" />
+                    <text x="135" y="308" text-anchor="middle" font-size="24" font-weight="600">Reputation</text>
+                    <text class="small" x="135" y="338" text-anchor="middle">Beta-Binomial weights</text>
+
+                    <rect class="node accent" x="320" y="266" width="250" height="96" rx="10" />
+                    <text x="445" y="308" text-anchor="middle" font-size="24" font-weight="600">Kalman Filter</text>
+                    <text class="small" x="445" y="338" text-anchor="middle">level + trend, Joseph form</text>
+
+                    <rect class="node alert" x="612" y="266" width="316" height="96" rx="10" />
+                    <text class="on-alert" x="770" y="306" text-anchor="middle" font-size="24" font-weight="700">7-State Capital Gate</text>
+                    <text class="on-alert" x="770" y="338" text-anchor="middle" font-size="16">ALLOW / REDUCE / BLOCK / FLATTEN</text>
+
+                    <rect class="node" x="970" y="266" width="240" height="96" rx="10" />
+                    <text x="1090" y="308" text-anchor="middle" font-size="24" font-weight="600">Product Gate</text>
+                    <text class="small" x="1090" y="338" text-anchor="middle">equity / options / cash</text>
+
+                    <rect class="node accent" x="1270" y="266" width="250" height="96" rx="10" />
+                    <text x="1395" y="308" text-anchor="middle" font-size="24" font-weight="600">Alpaca Paper</text>
+                    <text class="small" x="1395" y="338" text-anchor="middle">+ circuit breaker</text>
+                </g>
+                <path class="edge" d="M 260 314 L 316 314" marker-end="url(#arrow)" />
+                <path class="edge" d="M 570 314 L 608 314" marker-end="url(#arrow)" />
+                <path class="edge alert" d="M 928 314 L 966 314" marker-end="url(#arrow-alert)" />
+                <path class="edge" d="M 1210 314 L 1266 314" marker-end="url(#arrow)" />
+
+                <!-- blocked branch -->
+                <path class="edge alert" d="M 770 362 L 770 430" marker-end="url(#arrow-alert)" />
+                <rect class="node" x="600" y="432" width="340" height="80" rx="10" />
+                <text x="770" y="468" text-anchor="middle" font-size="22" font-weight="600">Rejection logged</text>
+                <text class="small" x="770" y="494" text-anchor="middle">audit trail with rule citation</text>
+
+                <!-- feedback -->
+                <rect class="node" x="1270" y="432" width="250" height="80" rx="10" />
+                <text x="1395" y="468" text-anchor="middle" font-size="22" font-weight="600">Reconciliation</text>
+                <text class="small" x="1395" y="494" text-anchor="middle">fills vs. expectation</text>
+                <path class="edge" d="M 1395 362 L 1395 428" marker-end="url(#arrow)" />
+                <path class="edge" d="M 1270 472 L 1000 472" marker-end="url(#arrow)" />
+                <path class="edge" d="M 600 472 L 135 472 L 135 366" marker-end="url(#arrow)" />
+                <text class="small mono" x="1120" y="452" text-anchor="middle">closed learning loop</text>
+            </svg>
+        </div>
+        <div class="slide-brand">X Quant X</div>
+        <div class="slide-number"></div>
+    </section>
+
+    <!-- ======================================================== 05 regime -->
+    <section class="slide">
+        <div class="eyebrow">04 &middot; Stage one</div>
+        <h2>Classify the environment before<br>you evaluate the opportunity.</h2>
+        <div class="body">
+            <div class="col" style="flex:1.1">
+                <p style="margin-bottom:24px">A bounded feature vector - momentum, realised volatility via
+                    ATR, a VIX proxy, volume profile - is mapped by a Hidden Markov Model onto an affinity
+                    distribution over twelve regime archetypes.</p>
+                <p>The affinities are normalised to sum to <span class="mono">1.0</span>. That property is
+                    not asserted in prose; it is enforced by a Hypothesis-generated property test over
+                    randomised price and volume series.</p>
+                <div class="card" style="margin-top:32px">
+                    <div class="label">Downstream effect</div>
+                    <p class="note" style="font-size:26px">Regime selects the portfolio construction method:
+                        mean-variance in R01 and R11, risk-parity in R03 and R05, minimum-variance in the
+                        stress regimes R04 and R07.</p>
+                </div>
+            </div>
+            <div class="col" style="flex:1">
+                <svg class="diagram" viewBox="0 0 800 560" preserveAspectRatio="xMidYMid meet" role="img"
+                    aria-label="Twelve regime archetypes grouped into constructive, caution, stress and neutral bands.">
+                    <text class="small mono" x="20" y="30">CONSTRUCTIVE</text>
+                    <g>
+                        <rect class="node accent" x="20" y="48" width="150" height="80" rx="10" />
+                        <text x="95" y="96" text-anchor="middle" font-size="30" font-weight="600">R01</text>
+                        <rect class="node accent" x="196" y="48" width="150" height="80" rx="10" />
+                        <text x="271" y="96" text-anchor="middle" font-size="30" font-weight="600">R02</text>
+                        <rect class="node accent" x="372" y="48" width="150" height="80" rx="10" />
+                        <text x="447" y="96" text-anchor="middle" font-size="30" font-weight="600">R11</text>
+                    </g>
+                    <text class="small mono" x="20" y="190">CAUTION</text>
+                    <rect class="node" x="20" y="208" width="150" height="80" rx="10" stroke="#f59e0b" />
+                    <text x="95" y="256" text-anchor="middle" font-size="30" font-weight="600">R03</text>
+                    <rect class="node" x="196" y="208" width="150" height="80" rx="10" stroke="#e11d48" />
+                    <text x="271" y="256" text-anchor="middle" font-size="30" font-weight="600">R05</text>
+                    <text class="small mono" x="20" y="350">STRESS</text>
+                    <rect class="node alert" x="20" y="368" width="150" height="80" rx="10" />
+                    <text class="on-alert" x="95" y="416" text-anchor="middle" font-size="30" font-weight="700">R04</text>
+                    <rect class="node alert" x="196" y="368" width="150" height="80" rx="10" />
+                    <text class="on-alert" x="271" y="416" text-anchor="middle" font-size="30" font-weight="700">R07</text>
+                    <text class="small" x="372" y="404">Stress regimes force the</text>
+                    <text class="small" x="372" y="428">minimum-variance construction</text>
+                    <text class="small" x="372" y="452">and the alert palette.</text>
+                    <text class="small mono" x="20" y="510">NEUTRAL</text>
+                    <g>
+                        <rect class="node" x="130" y="486" width="100" height="52" rx="8" />
+                        <text x="180" y="520" text-anchor="middle" font-size="24">R06</text>
+                        <rect class="node" x="246" y="486" width="100" height="52" rx="8" />
+                        <text x="296" y="520" text-anchor="middle" font-size="24">R08</text>
+                        <rect class="node" x="362" y="486" width="100" height="52" rx="8" />
+                        <text x="412" y="520" text-anchor="middle" font-size="24">R09</text>
+                        <rect class="node" x="478" y="486" width="100" height="52" rx="8" />
+                        <text x="528" y="520" text-anchor="middle" font-size="24">R10</text>
+                        <rect class="node" x="594" y="486" width="100" height="52" rx="8" />
+                        <text x="644" y="520" text-anchor="middle" font-size="24">R12</text>
+                    </g>
+                </svg>
+            </div>
+        </div>
+        <div class="slide-brand">X Quant X</div>
+        <div class="slide-number"></div>
+    </section>
+
+    <!-- ======================================================== 06 agents -->
+    <section class="slide">
+        <div class="eyebrow">05 &middot; Stage two</div>
+        <h2>Seven lenses on one market.</h2>
+        <div class="body" style="flex-direction:column">
+            <div class="card-grid" style="grid-template-columns:repeat(4,1fr)">
+                <div class="card">
+                    <div class="label">01 Economic</div>
+                    <p class="note" style="font-size:24px">Macro indicators, inflation, rate expectations, GDP trend.</p>
+                </div>
+                <div class="card">
+                    <div class="label">02 Financial</div>
+                    <p class="note" style="font-size:24px">Liquidity, credit spreads, yield-curve shape, systemic stability.</p>
+                </div>
+                <div class="card">
+                    <div class="label">03 Fiscal</div>
+                    <p class="note" style="font-size:24px">Government spending, debt issuance, taxation policy.</p>
+                </div>
+                <div class="card">
+                    <div class="label">04 Portfolio</div>
+                    <p class="note" style="font-size:24px">Exposure, drawdown limits, leverage, diversification.</p>
+                </div>
+                <div class="card">
+                    <div class="label">05 Fundamental</div>
+                    <p class="note" style="font-size:24px">Earnings, valuation ratios, balance sheet, growth.</p>
+                </div>
+                <div class="card">
+                    <div class="label">06 Market</div>
+                    <p class="note" style="font-size:24px">Order book, volume profile, volatility, momentum.</p>
+                </div>
+                <div class="card">
+                    <div class="label">07 Sector</div>
+                    <p class="note" style="font-size:24px">Relative strength, industry tailwinds, cross-asset correlation.</p>
+                </div>
+                <div class="card alert-card">
+                    <div class="label">Common interface</div>
+                    <div class="value mono" style="font-size:38px">s&#8339; &isin; [-1, 1]</div>
+                    <p class="note" style="font-size:22px">Direction is normalised, so methodology stays separate from decision representation.</p>
+                </div>
+            </div>
+            <p style="margin-top:40px">Each agent is a typed software object implementing an Operator
+                interface - not a Markdown persona. A new agent can be added without touching the
+                aggregation layer, because the aggregation layer only ever sees a direction and a
+                confidence.</p>
+        </div>
+        <div class="slide-brand">X Quant X</div>
+        <div class="slide-number"></div>
+    </section>
+
+    <!-- ================================================== 07 disagreement -->
+    <section class="slide">
+        <div class="eyebrow">06 &middot; Stage three</div>
+        <h2>Disagreement is data,<br>not noise to be averaged out.</h2>
+        <div class="body">
+            <div class="col">
+                <p style="margin-bottom:28px">The fused signal is a reputation-weighted mean of the seven
+                    directions. Alongside it, the platform computes a <strong>disagreement</strong>
+                    statistic over the same seven inputs.</p>
+                <p style="margin-bottom:28px">High disagreement does not veto a trade on its own. It
+                    propagates into the capital gate, where it reduces available capacity - the system
+                    trades smaller precisely when its own analysts are least aligned.</p>
+                <div class="card">
+                    <div class="label">Bounded by construction</div>
+                    <p class="note" style="font-size:26px">Signal, disagreement and confidence are all
+                        proven bounded for randomised seven-agent inputs by property-based tests, not by
+                        spot-checked examples.</p>
+                </div>
+            </div>
+            <div class="col">
+                <svg class="diagram" viewBox="0 0 780 520" preserveAspectRatio="xMidYMid meet" role="img"
+                    aria-label="Seven agent directions fused into one weighted signal, with a separate disagreement output.">
+                    <line class="edge" x1="60" y1="260" x2="700" y2="260" stroke-dasharray="6 8" />
+                    <text class="small mono" x="60" y="300" text-anchor="middle">-1</text>
+                    <text class="small mono" x="380" y="300" text-anchor="middle">0</text>
+                    <text class="small mono" x="700" y="300" text-anchor="middle">+1</text>
+                    <g>
+                        <circle cx="212" cy="260" r="14" fill="#7d5a60" />
+                        <circle cx="300" cy="260" r="14" fill="#7d5a60" />
+                        <circle cx="468" cy="260" r="14" fill="#7d5a60" />
+                        <circle cx="540" cy="260" r="14" fill="#7d5a60" />
+                        <circle cx="596" cy="260" r="14" fill="#7d5a60" />
+                        <circle cx="628" cy="260" r="14" fill="#7d5a60" />
+                        <circle cx="156" cy="260" r="14" fill="#7d5a60" />
+                    </g>
+                    <line class="edge alert" x1="443" y1="200" x2="443" y2="320" stroke-width="5" />
+                    <text class="mono" x="443" y="180" text-anchor="middle" font-size="24" fill="#FFAEC9">fused</text>
+                    <text class="small" x="443" y="356" text-anchor="middle">reputation-weighted mean</text>
+
+                    <rect class="node" x="120" y="400" width="240" height="90" rx="10" />
+                    <text x="240" y="438" text-anchor="middle" font-size="24" font-weight="600">Wide spread</text>
+                    <text class="small" x="240" y="466" text-anchor="middle">high disagreement, smaller size</text>
+                    <rect class="node accent" x="400" y="400" width="260" height="90" rx="10" />
+                    <text x="530" y="438" text-anchor="middle" font-size="24" font-weight="600">Tight cluster</text>
+                    <text class="small" x="530" y="466" text-anchor="middle">low disagreement, fuller size</text>
+
+                    <text class="small mono" x="60" y="60">SEVEN AGENT DIRECTIONS</text>
+                </svg>
+            </div>
+        </div>
+        <div class="slide-brand">X Quant X</div>
+        <div class="slide-number"></div>
+    </section>
+
+    <!-- ==================================================== 08 reputation -->
+    <section class="slide">
+        <div class="eyebrow">07 &middot; Stage four</div>
+        <h2>Influence has to be earned,<br>and it can be lost.</h2>
+        <div class="body">
+            <div class="col">
+                <p style="margin-bottom:28px">Every agent carries a Beta-Binomial posterior over its own
+                    realised hit rate, updated on each reconciled outcome.</p>
+                <ol class="numbered">
+                    <li>An agent that has been right is weighted up.</li>
+                    <li>An agent that has been wrong is weighted down.</li>
+                    <li>A new agent starts at the prior and has to earn its influence before it can move
+                        capital.</li>
+                </ol>
+                <p style="margin-top:28px">Reputation state is persisted and restored across sessions, so
+                    the learning loop survives a process restart rather than resetting to a flattering
+                    blank slate.</p>
+            </div>
+            <div class="col">
+                <div class="card" style="height:100%;display:flex;flex-direction:column;justify-content:center">
+                    <div class="label">Update rule</div>
+                    <p class="mono" style="font-size:34px;color:var(--text-primary);margin-top:20px;line-height:1.7">
+                        &alpha;&#8339; &larr; &alpha;&#8339; + 1 &nbsp;on a correct call<br>
+                        &beta;&#8339; &nbsp;&larr; &beta;&#8339; + 1 &nbsp;on an incorrect call<br>
+                        w&#8339; &nbsp;&prop; &nbsp;&alpha;&#8339; / (&alpha;&#8339; + &beta;&#8339;)
+                    </p>
+                    <p class="note" style="font-size:24px;margin-top:28px">The posterior mean is the weight.
+                        Uncertainty shrinks only with evidence, so a lucky streak of two does not buy the
+                        same influence as a track record of two hundred.</p>
+                </div>
+            </div>
+        </div>
+        <div class="slide-brand">X Quant X</div>
+        <div class="slide-number"></div>
+    </section>
+
+    <!-- ======================================================== 09 kalman -->
+    <section class="slide">
+        <div class="eyebrow">08 &middot; Stage five</div>
+        <h2>Smooth the signal, keep the covariance honest.</h2>
+        <div class="body">
+            <div class="col" style="flex:1.2">
+                <svg class="diagram" viewBox="0 0 900 500" preserveAspectRatio="xMidYMid meet" role="img"
+                    aria-label="Kalman filter predict and update cycle producing a smoothed level and trend state.">
+                    <rect class="node" x="30" y="200" width="200" height="100" rx="10" />
+                    <text x="130" y="242" text-anchor="middle" font-size="24" font-weight="600">Observation</text>
+                    <text class="small mono" x="130" y="272" text-anchor="middle">z_t (noisy fused signal)</text>
+
+                    <rect class="node accent" x="330" y="60" width="240" height="110" rx="10" />
+                    <text x="450" y="102" text-anchor="middle" font-size="24" font-weight="600">Predict</text>
+                    <text class="small mono" x="450" y="132" text-anchor="middle">x = F x</text>
+                    <text class="small mono" x="450" y="154" text-anchor="middle">P = F P F' + Q</text>
+
+                    <rect class="node accent" x="330" y="330" width="240" height="110" rx="10" />
+                    <text x="450" y="372" text-anchor="middle" font-size="24" font-weight="600">Update</text>
+                    <text class="small mono" x="450" y="402" text-anchor="middle">Joseph-form covariance</text>
+                    <text class="small mono" x="450" y="424" text-anchor="middle">guarantees symmetry</text>
+
+                    <rect class="node alert" x="660" y="200" width="220" height="100" rx="10" />
+                    <text class="on-alert" x="770" y="238" text-anchor="middle" font-size="24" font-weight="700">Smoothed state</text>
+                    <text class="on-alert" x="770" y="268" text-anchor="middle" font-size="18">level &middot; trend</text>
+
+                    <path class="edge" d="M 230 250 L 326 380" marker-end="url(#arrow)" />
+                    <path class="edge" d="M 570 115 L 640 115 L 640 210 " marker-end="url(#arrow)" />
+                    <path class="edge" d="M 570 385 L 640 385 L 640 292" marker-end="url(#arrow)" />
+                    <path class="edge" d="M 450 330 L 450 175" marker-end="url(#arrow)" />
+                    <text class="small" x="486" y="256">recursion</text>
+                </svg>
+            </div>
+            <div class="col">
+                <p style="margin-bottom:28px">The fused signal is treated as a noisy observation of a latent
+                    two-dimensional state - <strong>level</strong> and <strong>trend</strong> - and smoothed
+                    by a linear Kalman filter.</p>
+                <p style="margin-bottom:28px">The covariance update uses the Joseph form, which preserves
+                    symmetry and positive-definiteness under finite precision where the naive form does not.</p>
+                <div class="card alert-card">
+                    <div class="label">Ported and verified</div>
+                    <div class="value" style="font-size:44px">11 / 11</div>
+                    <p class="note" style="font-size:24px">GoogleTest cases pass on the C++ kernel, which
+                        matches the Python reference to full double precision. The kernel links no network,
+                        no broker SDK and no file I/O.</p>
+                </div>
+            </div>
+        </div>
+        <div class="slide-brand">X Quant X</div>
+        <div class="slide-number"></div>
+    </section>
+
+    <!-- ========================================================== 10 gate -->
+    <section class="slide">
+        <div class="eyebrow">09 &middot; The gate</div>
+        <h2>Seven dimensions of capacity.<br>Any one of them can close the door.</h2>
+        <div class="body">
+            <svg class="diagram" viewBox="0 0 1730 600" preserveAspectRatio="xMidYMid meet" role="img"
+                aria-label="Seven state charges multiplied into a composite gating factor, scaled by the Kalman gain, producing a verdict.">
+                <text class="small mono" x="20" y="30">STATE OF CHARGE, EACH NORMALISED TO 0 - 1</text>
+                <g>
+                    <rect class="node accent" x="20" y="52" width="270" height="62" rx="8" />
+                    <text x="44" y="92" font-size="24" font-weight="600">E&#8348; &nbsp;Economic</text>
+                    <rect class="node accent" x="20" y="128" width="270" height="62" rx="8" />
+                    <text x="44" y="168" font-size="24" font-weight="600">F&#8348; &nbsp;Financial</text>
+                    <rect class="node accent" x="20" y="204" width="270" height="62" rx="8" />
+                    <text x="44" y="244" font-size="24" font-weight="600">G&#8348; &nbsp;Fiscal</text>
+                    <rect class="node accent" x="20" y="280" width="270" height="62" rx="8" />
+                    <text x="44" y="320" font-size="24" font-weight="600">P&#8348; &nbsp;Portfolio</text>
+                    <rect class="node accent" x="20" y="356" width="270" height="62" rx="8" />
+                    <text x="44" y="396" font-size="24" font-weight="600">U&#8348; &nbsp;Fundamental</text>
+                    <rect class="node accent" x="20" y="432" width="270" height="62" rx="8" />
+                    <text x="44" y="472" font-size="24" font-weight="600">M&#8348; &nbsp;Market</text>
+                    <rect class="node accent" x="20" y="508" width="270" height="62" rx="8" />
+                    <text x="44" y="548" font-size="24" font-weight="600">T&#8348; &nbsp;Sector</text>
+                </g>
+                <path class="edge" d="M 290 83 L 420 280" marker-end="url(#arrow)" />
+                <path class="edge" d="M 290 159 L 420 292" marker-end="url(#arrow)" />
+                <path class="edge" d="M 290 235 L 420 300" marker-end="url(#arrow)" />
+                <path class="edge" d="M 290 311 L 420 311" marker-end="url(#arrow)" />
+                <path class="edge" d="M 290 387 L 420 322" marker-end="url(#arrow)" />
+                <path class="edge" d="M 290 463 L 420 330" marker-end="url(#arrow)" />
+                <path class="edge" d="M 290 539 L 420 342" marker-end="url(#arrow)" />
+
+                <rect class="node" x="430" y="240" width="300" height="150" rx="12" />
+                <text x="580" y="292" text-anchor="middle" font-size="26" font-weight="600">Threshold map</text>
+                <text class="small mono" x="580" y="326" text-anchor="middle">minimum &rarr; full, per state</text>
+                <text class="small" x="580" y="356" text-anchor="middle">yields &gamma; in 0 to 1</text>
+
+                <path class="edge" d="M 730 315 L 800 315" marker-end="url(#arrow)" />
+                <rect class="node accent" x="810" y="240" width="330" height="150" rx="12" />
+                <text x="975" y="292" text-anchor="middle" font-size="26" font-weight="600">Product of factors</text>
+                <text class="mono" x="975" y="334" text-anchor="middle" font-size="30" fill="#FFAEC9">&Gamma;&#8348; = &prod; &gamma;&#7503;</text>
+                <text class="small" x="975" y="366" text-anchor="middle">one depleted state collapses all</text>
+
+                <rect class="node" x="810" y="60" width="330" height="110" rx="12" />
+                <text x="975" y="102" text-anchor="middle" font-size="26" font-weight="600">Investment Kalman gain</text>
+                <text class="small mono" x="975" y="136" text-anchor="middle">K&#8348; - how much has been learned</text>
+                <path class="edge" d="M 1140 115 L 1355 115 L 1355 246" marker-end="url(#arrow)" />
+                <path class="edge" d="M 1140 315 L 1196 315" marker-end="url(#arrow)" />
+
+                <rect class="node alert" x="1210" y="250" width="290" height="130" rx="12" />
+                <text class="on-alert" x="1355" y="298" text-anchor="middle" font-size="26" font-weight="700">Effective cap</text>
+                <text class="on-alert" x="1355" y="336" text-anchor="middle" font-size="24">min of 1 and K&#8348; &middot; &Gamma;&#8348;</text>
+
+                <path class="edge alert" d="M 1500 315 L 1552 315" marker-end="url(#arrow-alert)" />
+                <text class="small mono" x="1560" y="168">VERDICT</text>
+                <g>
+                    <rect class="node" x="1560" y="180" width="150" height="56" rx="8" stroke="#2DD4BF" />
+                    <text x="1635" y="216" text-anchor="middle" font-size="22" font-weight="600">ALLOW</text>
+                    <rect class="node" x="1560" y="248" width="150" height="56" rx="8" stroke="#f59e0b" />
+                    <text x="1635" y="284" text-anchor="middle" font-size="22" font-weight="600">REDUCE</text>
+                    <rect class="node" x="1560" y="316" width="150" height="56" rx="8" stroke="#e11d48" />
+                    <text x="1635" y="352" text-anchor="middle" font-size="22" font-weight="600">BLOCK</text>
+                    <rect class="node alert" x="1560" y="384" width="150" height="56" rx="8" />
+                    <text class="on-alert" x="1635" y="420" text-anchor="middle" font-size="22" font-weight="700">FLATTEN</text>
+                </g>
+            </svg>
+        </div>
+        <div class="slide-brand">X Quant X</div>
+        <div class="slide-number"></div>
+    </section>
+
+    <!-- ===================================================== 11 why product -->
+    <section class="slide">
+        <div class="eyebrow">10 &middot; Why a product, not a sum</div>
+        <h2>A strong macro backdrop cannot buy permission<br>to trade through a liquidity hole.</h2>
+        <div class="body">
+            <div class="col">
+                <div class="card" style="margin-bottom:24px">
+                    <div class="label">If the gate summed</div>
+                    <p class="note" style="font-size:26px">Six healthy dimensions would out-vote one
+                        catastrophic dimension. The system would size into a crisis because the average
+                        looked fine.</p>
+                </div>
+                <div class="card alert-card">
+                    <div class="label">Because the gate multiplies</div>
+                    <p class="note" style="font-size:26px">A single depleted dimension drives the composite
+                        factor toward zero regardless of the other six. Capacity is a conjunction, not a
+                        popularity contest.</p>
+                </div>
+            </div>
+            <div class="col">
+                <h3>Ten discrete rules sit on top</h3>
+                <p style="margin-bottom:20px"><span class="mono">CONC-001</span> through
+                    <span class="mono">EXEC-001</span> cover concentration, leverage, drawdown, sector
+                    exposure, liquidity and execution timeout.</p>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Verdict</th>
+                            <th>Effect on the order</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr><td>ALLOW</td><td>Proceeds at the computed cap</td></tr>
+                        <tr><td>REDUCE</td><td>Proceeds at a reduced notional</td></tr>
+                        <tr><td>BLOCK</td><td>No order is submitted</td></tr>
+                        <tr><td>FLATTEN</td><td>Existing exposure is closed</td></tr>
+                    </tbody>
+                </table>
+                <p style="margin-top:24px">Every rejection is written to the audit trail with the citation of
+                    the rule that caused it. <strong>A blocked trade is as visible on the dashboard as an
+                    executed one.</strong></p>
+            </div>
+        </div>
+        <div class="slide-brand">X Quant X</div>
+        <div class="slide-number"></div>
+    </section>
+
+    <!-- ===================================================== 12 execution -->
+    <section class="slide">
+        <div class="eyebrow">11 &middot; Execution</div>
+        <h2>Paper endpoints only, behind a breaker.</h2>
+        <div class="body">
+            <div class="col">
+                <ol class="numbered">
+                    <li><strong>Product gate.</strong> A surviving decision is routed to an instrument -
+                        equity, options or cash - according to regime and the smoothed signal.</li>
+                    <li><strong>Alpaca paper submission.</strong> The execution layer contacts only the
+                        paper endpoint. Live-money trading is out of scope at the architecture level, not
+                        merely by configuration.</li>
+                    <li><strong>Emergency circuit breaker.</strong> A single call cancels all open orders and
+                        closes all positions, with polling until the account is confirmed flat.</li>
+                    <li><strong>Reconciliation.</strong> Fills are compared against expectation, and the
+                        outcome updates both agent reputation and trade memory.</li>
+                </ol>
+            </div>
+            <div class="col">
+                <div class="card-grid cols-2">
+                    <div class="card">
+                        <div class="label">Order safety</div>
+                        <p class="note" style="font-size:24px">Preview, notional check and buying-power check
+                            before any submission.</p>
+                    </div>
+                    <div class="card">
+                        <div class="label">Idempotency</div>
+                        <p class="note" style="font-size:24px">Client order IDs so an ambiguous retry cannot
+                            duplicate an order.</p>
+                    </div>
+                    <div class="card">
+                        <div class="label">Audit trail</div>
+                        <p class="note" style="font-size:24px">Every decision, allowed or rejected, is
+                            appended with its rule citation.</p>
+                    </div>
+                    <div class="card alert-card">
+                        <div class="label">Hard boundary</div>
+                        <div class="value" style="font-size:34px">No live money</div>
+                        <p class="note" style="font-size:22px">No custody, no client funds, no regulated
+                            advice.</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="slide-brand">X Quant X</div>
+        <div class="slide-number"></div>
+    </section>
+
+    <!-- ===================================================== 13 dashboard -->
+    <section class="slide">
+        <div class="eyebrow">12 &middot; The control room</div>
+        <h2>If the system rejected a trade,<br>you can see why.</h2>
+        <div class="body">
+            <div class="col" style="flex:1">
+                <p style="margin-bottom:28px">The Dash and Plotly control room renders the same palette as
+                    this deck, because it is the same product.</p>
+                <ol class="numbered">
+                    <li>Equity curve and drawdown</li>
+                    <li>Regime probability over R01 to R12</li>
+                    <li>Risk-gate audit trail with rule citations</li>
+                    <li>Positions, P&amp;L and margin</li>
+                    <li>Order blotter and manual controls</li>
+                </ol>
+            </div>
+            <div class="col" style="flex:1.3">
+                <svg class="diagram" viewBox="0 0 900 520" preserveAspectRatio="xMidYMid meet" role="img"
+                    aria-label="Wireframe of the control room dashboard layout.">
+                    <rect class="node" x="10" y="10" width="880" height="500" rx="12" />
+                    <rect x="10" y="10" width="880" height="56" rx="12" fill="#0c0a0a" />
+                    <text x="34" y="46" font-size="22" font-weight="600">X QUANT X &middot; CONTROL ROOM</text>
+                    <rect x="700" y="24" width="170" height="30" rx="15" fill="#FFAEC9" />
+                    <text x="785" y="45" text-anchor="middle" font-size="18" font-weight="700" fill="#000000">REGIME R04</text>
+
+                    <rect class="node accent" x="30" y="86" width="530" height="200" rx="8" />
+                    <text class="small mono" x="50" y="114">EQUITY CURVE</text>
+                    <polyline class="edge" points="50,250 110,232 170,244 230,206 290,214 350,178 410,190 470,150 530,162"
+                        stroke="#B76E79" stroke-width="4" />
+
+                    <rect class="node" x="580" y="86" width="290" height="95" rx="8" />
+                    <text class="small mono" x="600" y="116">DRAWDOWN</text>
+                    <text class="mono" x="600" y="160" font-size="34" fill="#f59e0b">-4.2%</text>
+                    <rect class="node" x="580" y="191" width="290" height="95" rx="8" />
+                    <text class="small mono" x="600" y="221">GATING FACTOR</text>
+                    <text class="mono" x="600" y="265" font-size="34" fill="#B76E79">0.38</text>
+
+                    <rect class="node" x="30" y="306" width="530" height="184" rx="8" />
+                    <text class="small mono" x="50" y="334">RISK-GATE AUDIT TRAIL</text>
+                    <rect x="50" y="350" width="490" height="34" rx="6" fill="#170f11" stroke="#332628" />
+                    <text class="small mono" x="66" y="373">ALLOW &middot; AAPL &middot; cap 0.38</text>
+                    <rect x="50" y="392" width="490" height="34" rx="6" fill="#FFAEC9" />
+                    <text class="small mono" x="66" y="415" fill="#000000">FLATTEN &middot; TSLA &middot; DRAW-002</text>
+                    <rect x="50" y="434" width="490" height="34" rx="6" fill="#e11d48" />
+                    <text class="small mono" x="66" y="457" fill="#f2ecec">BLOCK &middot; NVDA &middot; CONC-001</text>
+
+                    <rect class="node" x="580" y="306" width="290" height="184" rx="8" />
+                    <text class="small mono" x="600" y="334">REGIME PROBABILITY</text>
+                    <rect x="600" y="352" width="230" height="18" rx="9" fill="#FFAEC9" />
+                    <rect x="600" y="382" width="150" height="18" rx="9" fill="#B76E79" />
+                    <rect x="600" y="412" width="96" height="18" rx="9" fill="#7d5a60" />
+                    <rect x="600" y="442" width="52" height="18" rx="9" fill="#6b7280" />
+                </svg>
+            </div>
+        </div>
+        <div class="slide-brand">X Quant X</div>
+        <div class="slide-number"></div>
+    </section>
+
+    <!-- ====================================================== 14 evidence -->
+    <section class="slide">
+        <div class="eyebrow">13 &middot; Engineering evidence</div>
+        <h2>We hold the platform to the same standard<br>it applies to markets.</h2>
+        <div class="body" style="flex-direction:column">
+            <div class="card-grid">
+                <div class="card">
+                    <div class="label">Automated tests</div>
+                    <div class="value">868</div>
+                    <p class="note">passed, plus 14 subtests. Zero failing.</p>
+                </div>
+                <div class="card">
+                    <div class="label">Statement coverage</div>
+                    <div class="value">82%</div>
+                    <p class="note">of 6,419 statements. Reported, not rounded up.</p>
+                </div>
+                <div class="card">
+                    <div class="label">C++ kernel</div>
+                    <div class="value positive">11/11</div>
+                    <p class="note">GoogleTest, exact double-precision parity with Python.</p>
+                </div>
+                <div class="card">
+                    <div class="label">Test categories</div>
+                    <div class="value">6</div>
+                    <p class="note">unit, integration, performance, security, scalability, correctness.</p>
+                </div>
+            </div>
+            <div class="body" style="margin-top:40px">
+                <div class="col">
+                    <h3>Property-based, not example-based</h3>
+                    <p>Hypothesis generates the inputs: gate factors stay in [0, 1] and stay deterministic;
+                        ensemble signal, disagreement and confidence stay bounded; regime affinities sum to
+                        1.0.</p>
+                </div>
+                <div class="col">
+                    <h3>Two real defects, found by tests</h3>
+                    <p>A session-controller restart race, and an O(n&sup2;) replay characteristic traced to
+                        per-write full-file fsync in trade memory. Both root-caused, both documented.</p>
+                </div>
+                <div class="col">
+                    <h3>Security gate in the suite</h3>
+                    <p>A hardcoded-credential scan and a bandit run asserting zero high-severity findings
+                        execute as ordinary tests, on every run.</p>
+                </div>
+            </div>
+        </div>
+        <div class="slide-brand">X Quant X</div>
+        <div class="slide-number"></div>
+    </section>
+
+    <!-- ==================================================== 15 non-claims -->
+    <section class="slide">
+        <div class="eyebrow">14 &middot; What we do not claim</div>
+        <h2>The honest slide.</h2>
+        <div class="body">
+            <div class="col">
+                <div class="card alert-card" style="margin-bottom:24px">
+                    <div class="label">No performance figures</div>
+                    <p class="note" style="font-size:28px">No returns, no Sharpe, no win rate. None has been
+                        independently verified, so none appears anywhere in this submission.</p>
+                </div>
+                <div class="card">
+                    <div class="label">No live-money trading</div>
+                    <p class="note" style="font-size:26px">This is a demonstration of decision architecture
+                        and risk discipline, not of profitability.</p>
+                </div>
+            </div>
+            <div class="col">
+                <div class="card" style="margin-bottom:24px">
+                    <div class="label">Coverage is 82 percent, not 100</div>
+                    <p class="note" style="font-size:26px">The uncovered surfaces - dashboard callback
+                        branches, HMM calibration internals, live-session error paths - are enumerated
+                        explicitly in the engineering report rather than papered over.</p>
+                </div>
+                <div class="card">
+                    <div class="label">Mutation testing configured, not executed</div>
+                    <p class="note" style="font-size:26px">The tool requires WSL, unavailable on the build
+                        machine. The configuration is committed. The score is not fabricated.</p>
+                </div>
+            </div>
+        </div>
+        <div class="slide-brand">X Quant X</div>
+        <div class="slide-number"></div>
+    </section>
+
+    <!-- ======================================================= 16 closing -->
+    <section class="slide">
+        <div style="flex:1;display:flex;flex-direction:column;justify-content:center">
+            <div class="eyebrow">15 &middot; Close</div>
+            <h2 style="font-size:80px">A trading system should be able to<br>explain the trade it refused to make.</h2>
+            <p class="lead" style="margin-top:32px">X Quant X measures the regime, keeps its analysts'
+                disagreement in the open, weights them by what they have actually got right, and gates
+                capital on measured capacity across seven dimensions - then writes down every decision it
+                made, including the ones that never reached the broker.</p>
+            <p class="tagline" style="margin-top:48px">Predict less blindly. Measure more completely. Control
+                risk before capital.</p>
+        </div>
+        <div class="slide-brand">X Quant X</div>
+        <div class="slide-number"></div>
+    </section>
+
+    <script src="deck.js"></script>
+</body>
+
+</html>

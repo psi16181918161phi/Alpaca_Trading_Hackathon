@@ -128,3 +128,17 @@ Run a single hedge-check pass, or loop forever, across a symbol watchlist:
 python scripts/run_hedge_watchlist.py --once --watchlist AAPL MSFT TSLA
 python scripts/run_hedge_watchlist.py --watchlist AAPL MSFT TSLA --interval 300
 ```
+
+### 5. Presentation and Submission Media
+Regenerate the LabLab submission artefacts from the single HTML deck source in
+`presentation/deck/`. See [`presentation/README.md`](presentation/README.md) for
+the full pipeline, design tokens, and exit-code contract.
+
+```bash
+python scripts/presentation/render_deck_pdf.py --png-dir presentation/output/slides
+python scripts/presentation/record_deck_video.py --seconds-per-slide 16 --mp4
+python scripts/presentation/capture_dashboard_media.py --record-video
+```
+
+Requires `pip install -r requirements-dev.txt` followed by
+`python -m playwright install chromium`.

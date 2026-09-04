@@ -1,0 +1,400 @@
+/*
+ * X Quant X presentation theme.
+ *
+ * Palette is mirrored from src/investment_agent/dashboard/colors.py so the deck,
+ * the PDF, the video and the live dashboard are visibly the same product.
+ * Per coding_stds/visualization/aesthetic_standards.txt SS1.1, every colour used
+ * anywhere in the deck must resolve to a token declared in this block -- no raw
+ * hex literals below the :root rule.
+ */
+
+:root {
+    /* Core palette (Variant A: normal / monitoring state) */
+    --bg-primary: #000000;
+    --bg-secondary: #0c0a0a;
+    --bg-card: #170f11;
+    --text-primary: #f2ecec;
+    --text-secondary: #9a8489;
+    --grid-line: #2a2024;
+    --border: #332628;
+
+    /* Brand accents */
+    --accent: #B76E79;          /* rose gold: primary accent, rules, series-1 */
+    --accent-dim: #7d5a60;      /* secondary series, muted accent */
+    --alert: #FFAEC9;           /* Variant B: alert / emphasis */
+    --alert-badge: #e11d48;
+    --warn: #f59e0b;
+    --positive: #2DD4BF;
+    --neutral: #6b7280;
+
+    /* Typography */
+    --font-sans: 'Inter', 'Segoe UI', 'Roboto', sans-serif;
+    --font-mono: 'JetBrains Mono', 'Cascadia Mono', 'Roboto Mono', monospace;
+
+    /* Spacing scale (4px base, aesthetic_standards spacing tokens) */
+    --space-1: 8px;
+    --space-2: 16px;
+    --space-3: 24px;
+    --space-4: 40px;
+    --space-5: 64px;
+
+    /* Slide geometry: 16:9 at 1920x1080 */
+    --slide-w: 1920px;
+    --slide-h: 1080px;
+}
+
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+html,
+body {
+    width: 100%;
+    height: 100%;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    overflow: hidden;
+}
+
+/* ------------------------------------------------------------------ slide */
+
+.slide {
+    position: absolute;
+    inset: 0;
+    width: var(--slide-w);
+    height: var(--slide-h);
+    padding: var(--space-5) 96px;
+    display: none;
+    flex-direction: column;
+    justify-content: flex-start;
+    background:
+        radial-gradient(circle at 12% 0%, rgba(183, 110, 121, 0.16), transparent 55%),
+        var(--bg-primary);
+}
+
+.slide.is-active {
+    display: flex;
+}
+
+/* Thin rose-gold rule anchoring every slide to the brand. */
+.slide::after {
+    content: "";
+    position: absolute;
+    left: 96px;
+    right: 96px;
+    bottom: 48px;
+    height: 2px;
+    background: linear-gradient(90deg, var(--accent), transparent 70%);
+}
+
+.slide-number {
+    position: absolute;
+    right: 96px;
+    bottom: 60px;
+    font-family: var(--font-mono);
+    font-size: 20px;
+    color: var(--text-secondary);
+    letter-spacing: 0.08em;
+}
+
+.slide-brand {
+    position: absolute;
+    left: 96px;
+    bottom: 60px;
+    font-family: var(--font-mono);
+    font-size: 20px;
+    color: var(--text-secondary);
+    letter-spacing: 0.28em;
+    text-transform: uppercase;
+}
+
+/* ------------------------------------------------------------------- type */
+
+.eyebrow {
+    font-family: var(--font-mono);
+    font-size: 24px;
+    letter-spacing: 0.32em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: var(--space-3);
+}
+
+h1 {
+    font-size: 128px;
+    font-weight: 700;
+    line-height: 1.02;
+    letter-spacing: -0.03em;
+}
+
+h2 {
+    font-size: 64px;
+    font-weight: 700;
+    line-height: 1.08;
+    letter-spacing: -0.02em;
+    margin-bottom: var(--space-3);
+}
+
+h3 {
+    font-size: 32px;
+    font-weight: 600;
+    color: var(--alert);
+    margin-bottom: var(--space-1);
+}
+
+p,
+li {
+    font-size: 30px;
+    line-height: 1.5;
+    color: var(--text-secondary);
+}
+
+strong {
+    color: var(--text-primary);
+    font-weight: 600;
+}
+
+.lead {
+    font-size: 40px;
+    line-height: 1.4;
+    color: var(--text-primary);
+    max-width: 1400px;
+}
+
+.tagline {
+    font-size: 44px;
+    color: var(--alert);
+    font-weight: 600;
+    margin-top: var(--space-3);
+}
+
+.mono {
+    font-family: var(--font-mono);
+}
+
+/* ----------------------------------------------------------------- layout */
+
+.body {
+    flex: 1;
+    display: flex;
+    gap: var(--space-4);
+    margin-top: var(--space-2);
+    min-height: 0;
+}
+
+.col {
+    flex: 1;
+    min-width: 0;
+}
+
+ol.numbered {
+    list-style: none;
+    counter-reset: item;
+}
+
+ol.numbered > li {
+    counter-increment: item;
+    position: relative;
+    padding-left: 76px;
+    margin-bottom: var(--space-3);
+}
+
+ol.numbered > li::before {
+    content: counter(item) ".";
+    position: absolute;
+    left: 0;
+    top: 0;
+    font-family: var(--font-mono);
+    font-size: 30px;
+    color: var(--accent);
+}
+
+/* ------------------------------------------------------------------ cards */
+
+.card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: var(--space-3);
+}
+
+.card-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: var(--space-2);
+    width: 100%;
+}
+
+.card-grid.cols-3 {
+    grid-template-columns: repeat(3, 1fr);
+}
+
+.card-grid.cols-2 {
+    grid-template-columns: repeat(2, 1fr);
+}
+
+.card .label {
+    font-family: var(--font-mono);
+    font-size: 20px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--text-secondary);
+}
+
+.card .value {
+    font-family: var(--font-mono);
+    font-size: 56px;
+    font-weight: 600;
+    color: var(--accent);
+    line-height: 1.2;
+}
+
+.card .value.alert {
+    color: var(--alert);
+}
+
+.card .value.positive {
+    color: var(--positive);
+}
+
+.card .note {
+    font-size: 22px;
+    color: var(--text-secondary);
+    margin-top: var(--space-1);
+}
+
+/* Alert card: Variant B -- solid pink field, black text. Reserved for the
+   single most load-bearing statement on a slide. */
+.card.alert-card {
+    background: var(--alert);
+    border-color: var(--alert);
+}
+
+.card.alert-card .label,
+.card.alert-card .note,
+.card.alert-card p {
+    color: var(--bg-primary);
+    opacity: 0.78;
+}
+
+.card.alert-card .value {
+    color: var(--bg-primary);
+}
+
+/* ------------------------------------------------------------------ table */
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 26px;
+}
+
+th {
+    text-align: left;
+    font-family: var(--font-mono);
+    font-size: 20px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--accent);
+    padding: var(--space-1) var(--space-2);
+    border-bottom: 2px solid var(--accent);
+}
+
+td {
+    padding: var(--space-1) var(--space-2);
+    border-bottom: 1px solid var(--grid-line);
+    color: var(--text-secondary);
+}
+
+td:first-child {
+    color: var(--text-primary);
+    font-weight: 600;
+}
+
+/* --------------------------------------------------------------- diagrams */
+
+.diagram {
+    width: 100%;
+    height: 100%;
+    display: block;
+}
+
+.diagram text {
+    font-family: var(--font-sans);
+    fill: var(--text-primary);
+}
+
+.diagram text.small {
+    font-size: 18px;
+    fill: var(--text-secondary);
+}
+
+.diagram text.mono {
+    font-family: var(--font-mono);
+}
+
+.diagram .node {
+    fill: var(--bg-card);
+    stroke: var(--border);
+    stroke-width: 2;
+}
+
+.diagram .node.accent {
+    stroke: var(--accent);
+}
+
+.diagram .node.alert {
+    fill: var(--alert);
+    stroke: var(--alert);
+}
+
+.diagram .node.alert + text,
+.diagram text.on-alert {
+    fill: var(--bg-primary);
+}
+
+.diagram .edge {
+    stroke: var(--accent-dim);
+    stroke-width: 2.5;
+    fill: none;
+}
+
+.diagram .edge.alert {
+    stroke: var(--alert);
+}
+
+/* ------------------------------------------------------------------ print */
+
+/*
+ * Playwright's page.pdf() renders with print media emulation. Every slide is
+ * forced visible and paginated one-per-page at exactly 1920x1080 CSS pixels.
+ */
+@page {
+    size: 1920px 1080px;
+    margin: 0;
+}
+
+@media print {
+
+    html,
+    body {
+        overflow: visible;
+        height: auto;
+    }
+
+    .slide {
+        position: relative;
+        inset: auto;
+        display: flex !important;
+        break-after: page;
+        page-break-after: always;
+    }
+
+    .slide:last-of-type {
+        break-after: auto;
+        page-break-after: auto;
+    }
+}

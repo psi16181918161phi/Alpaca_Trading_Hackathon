@@ -260,6 +260,15 @@ htmlcov/
 .coverage
 .coverage.*
 
+# Presentation media: the PDF is a submission artefact and stays tracked; the
+# multi-megabyte PNG set and video captures are regenerable from deck/ by
+# scripts/presentation/ and must not bloat the repository.
+presentation/output/slides/
+presentation/output/dashboard/
+presentation/output/_capture/
+presentation/output/*.webm
+presentation/output/*.mp4
+
 # Keep VS Code MCP config (credentials are NOT stored in it — they use input prompts)
 !.vscode/
 !.vscode/mcp.json

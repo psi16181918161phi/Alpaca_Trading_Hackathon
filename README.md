@@ -31,6 +31,7 @@ not a disposable planning artifact.
   - [Current Status](#current-status)
   - [Table of Contents](#table-of-contents)
   - [About](#about)
+  - [Presentation and Submission Material](#presentation-and-submission-material)
   - [Documentation](#documentation)
   - [Getting Started](#getting-started)
   - [Project Status](#project-status)
@@ -43,6 +44,14 @@ not a disposable planning artifact.
 ## About
 
 See [ABOUT.md](ABOUT.md) for the full product identity, elevator pitch, and project origin.
+
+## Presentation and Submission Material
+
+The LabLab AI submission set lives in [`presentation/`](presentation/):
+
+- [`presentation/DESCRIPTION_SHORT.md`](presentation/DESCRIPTION_SHORT.md) — submission copy at four lengths, plus a verified-facts table
+- [`presentation/DESCRIPTION_LONG.md`](presentation/DESCRIPTION_LONG.md) — full narrative with architecture, Kalman, sequence, and capital-gate diagrams
+- [`presentation/README.md`](presentation/README.md) — how the PDF deck, per-slide images, and the full-HD walkthrough video are generated from one HTML source by the Playwright scripts in [`scripts/presentation/`](scripts/presentation/)
 
 ## Documentation
 
@@ -90,4 +99,5 @@ See [LICENSE.md](LICENSE.md) for full license terms.
 
 | Version | Date | Author | Description |
 | --- | --- | --- | --- |
+| 2026.9.3.1 | 2026-09-03 | Hadrian Hu | Added the Presentation and Submission Material section linking the LabLab deck, descriptions, and Playwright media pipeline. |
 | 2026.8.28.1 | 2026-08-28 | GitHub Copilot | Added current project facts and reconciled retained voice-era content with the X Quant X canon. |
